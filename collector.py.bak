@@ -1,0 +1,222 @@
+﻿# collector.py (auto-written by PowerShell)
+import os
+import re
+import time
+import hashlib
+import sqlite3
+from datetime import datetime, timezone
+
+import feedparser
+import requests
+from bs4 import BeautifulSoup
+from openai import OpenAI
+
+DB_PATH = os.getenv("NEWS_DB", "news.db")
+POLL_SECONDS = int(os.getenv("POLL_SECONDS", "30"))
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
+USER_AGENT = "Mozilla/5.0 (news-aggregator; +local)"
+
+FEEDS = [
+    ("BBC", "https://feeds.bbci.co.uk/news/rss.xml"),
+    ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
+    ("The Guardian", "https://www.theguardian.com/world/rss"),
+    ("Google News (Trump/Election 24h)", "https://news.google.com/rss/search?q=trump%20OR%20election%20when:1d&hl=en-US&gl=US&ceid=US:en"),
+    ("Google News (AI 24h)", "https://news.google.com/rss/search?q=artificial%20intelligence%20OR%20ai%20when:1d&hl=en-US&gl=US&ceid=US:en"),
+]
+
+TOPICS = [
+    "election",
+    "trump",
+    "artificial intelligence",
+    "bitcoin",
+    "russia",
+    "putin",
+    "israel",
+    "saudi",
+    "tulsi",
+    "intelligence community",
+    "fbi",
+    "executive order",
+    "china",
+    "dni",
+    "maduro",
+    "mandelson",
+]
+
+AI_TOPICS = [
+    "election",
+    "trump",
+    "artificial intelligence",
+    "bitcoin",
+    "russia",
+]
+
+ALIASES = {
+    "artificial intelligence": ["ai", "artificial intelligence", "a.i.", "machine learning", "ml", "llm", "chatgpt", "openai", "anthropic", "deepfake"],
+    "bitcoin": ["bitcoin", "btc", "satoshi"],
+    "election": ["election", "ballot", "voting", "vote", "polling", "midterm"],
+    "trump": ["trump", "donald trump", "white house", "truth social"],
+    "russia": ["russia", "russian", "kremlin", "moscow"],
+    "putin": ["putin", "vladimir putin"],
+    "israel": ["israel", "israeli", "idf", "netanyahu", "gaza"],
+    "china": ["china", "chinese", "beijing", "ccp"],
+    "fbi": ["fbi", "federal bureau of investigation"],
+    "dni": ["dni", "director of national intelligence"],
+    "intelligence community": ["intelligence community", "cia", "nsa", "ic"],
+    "executive order": ["executive order", "eo"],
+    "saudi": ["saudi", "saudi arabia", "mbs"],
+}
+
+client = OpenAI()
+
+def now_utc_iso():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+def norm(s):
+    return (s or "").strip().lower()
+
+def db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    return conn
+
+def stable_key(feed_name, entry):
+    guid = entry.get("id") or entry.get("guid") or ""
+    title = entry.get("title", "")
+    link = entry.get("link", "")
+    raw = f"{feed_name}|{guid}|{title}|{link}"
+    return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
+
+def is_seen_key(key):
+    with db() as conn:
+        cur = conn.execute("SELECT 1 FROM seen_keys WHERE key=? LIMIT 1", (key,))
+        return cur.fetchone() is not None
+
+def mark_seen_key(key):
+    with db() as conn:
+        conn.execute("INSERT OR REPLACE INTO seen_keys(key, seen_at) VALUES (?, ?)", (key, now_utc_iso()))
+
+def feed_is_warmed(feed_url):
+    with db() as conn:
+        cur = conn.execute("SELECT warmed_up FROM feed_state WHERE feed_url=? LIMIT 1", (feed_url,))
+        row = cur.fetchone()
+        return bool(row and row[0] == 1)
+
+def set_feed_warmed(feed_url):
+    with db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO feed_state(feed_url, warmed_up, warmed_at) VALUES (?, ?, ?)",
+            (feed_url, 1, now_utc_iso()),
+        )
+
+def warm_start_seed(feed_name, feed_url):
+    f = feedparser.parse(feed_url)
+    count = 0
+    for e in f.entries[:200]:
+        k = stable_key(feed_name, e)
+        if not is_seen_key(k):
+            mark_seen_key(k)
+            count += 1
+    set_feed_warmed(feed_url)
+    return count
+
+def find_matched_topic(text):
+    t = norm(text)
+    for topic in [norm(x) for x in TOPICS]:
+        phrases = ALIASES.get(topic, [topic])
+        for ph in phrases:
+            ph = norm(ph)
+            pattern = r"(?<![\\w])" + re.escape(ph) + r"(?![\\w])"
+            if re.search(pattern, t, flags=re.IGNORECASE):
+                return topic
+    return None
+
+def fetch_article_text(url):
+    if "news.google.com/rss/articles" in url:
+        return ""
+    try:
+        r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=12)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+        for tag in soup(["script", "style", "noscript", "header", "footer", "svg"]):
+            tag.decompose()
+        text = " ".join(soup.get_text(" ").split())
+        return text[:8000]
+    except Exception:
+        return ""
+
+def summarize_with_ai(title, url, text):
+    prompt = f"""Return:
+- 3-5 bullet points (plain text)
+- then: Why it matters: ...
+
+Title: {title}
+URL: {url}
+
+Article text (may be partial):
+{text}
+"""
+    resp = client.responses.create(model=OPENAI_MODEL, input=prompt)
+    out = getattr(resp, "output_text", None)
+    return (out or "").strip()
+
+def save_story(title, url, source, matched_topic, summary):
+    with db() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO stories(title, url, saved_at, matched_topic, source, summary) VALUES (?,?,?,?,?,?)",
+            (title, url, now_utc_iso(), matched_topic, source, summary),
+        )
+
+def run_once():
+    any_new = False
+    ai_topics_norm = set([norm(x) for x in AI_TOPICS])
+
+    for feed_name, feed_url in FEEDS:
+        if not feed_is_warmed(feed_url):
+            seeded = warm_start_seed(feed_name, feed_url)
+            print(f"WARM START ({feed_name}): seeded {seeded} items as already-seen. (No summaries created.)")
+            continue
+
+        f = feedparser.parse(feed_url)
+        for e in f.entries[:80]:
+            title = (e.get("title") or "").strip()
+            link = (e.get("link") or "").strip()
+            if not title or not link:
+                continue
+
+            k = stable_key(feed_name, e)
+            if is_seen_key(k):
+                continue
+            mark_seen_key(k)
+
+            matched = find_matched_topic(f"{title} {link}")
+            if not matched:
+                continue
+
+            any_new = True
+            print(f"NEW (topic) [{feed_name}]: {title}")
+
+            summary = ""
+            if matched in ai_topics_norm:
+                text = fetch_article_text(link)
+                summary = summarize_with_ai(title, link, text)
+
+            save_story(title, link, feed_name, matched, summary)
+            print(f"SAVED: {link}")
+
+    if not any_new:
+        print("No new topic stories across feeds.")
+
+def main():
+    print(f"Collector running every {POLL_SECONDS} seconds… (CTRL+C to stop)")
+    print("Feeds: " + ", ".join([n for n, _ in FEEDS]))
+    print("Topics: " + ", ".join(TOPICS))
+    print("AI summaries only for: " + ", ".join(AI_TOPICS))
+
+    while True:
+        run_once()
+        time.sleep(POLL_SECONDS)
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,277 @@
+﻿import os
+import re
+import time
+import sqlite3
+from datetime import datetime, timezone
+
+import feedparser
+
+DB_PATH = os.environ.get("NEWS_DB", "news.db")
+POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "30"))
+
+# ====== CONFIG ======
+FEEDS = [
+    ("BBC", "https://feeds.bbci.co.uk/news/rss.xml"),
+    ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/"),
+    ("The Guardian", "https://www.theguardian.com/international/rss"),
+    ("Google News (Trump/Election 24h)", "https://news.google.com/rss/search?q=Trump+OR+election+when:1d&hl=en-US&gl=US&ceid=US:en"),
+    ("Google News (AI 24h)", "https://news.google.com/rss/search?q=AI+OR+artificial+intelligence+when:1d&hl=en-US&gl=US&ceid=US:en"),
+]
+
+TOPICS = [
+    "election",
+    "trump",
+    "artificial intelligence",
+    "bitcoin",
+    "russia",
+    "putin",
+    "israel",
+    "saudi",
+    "tulsi",
+    "intelligence community",
+    "fbi",
+    "executive order",
+    "china",
+    "dni",
+    "maduro",
+    "mandelson",
+]
+
+AI_TOPICS = [
+    "election",
+    "trump",
+    "artificial intelligence",
+    "bitcoin",
+    "russia",
+]
+# =====================
+
+def now_utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+def connect_db():
+    return sqlite3.connect(DB_PATH)
+
+def init_db():
+    # Your migrate.py is the “real” schema manager, but this ensures tables exist.
+    with connect_db() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS stories (
+                url TEXT PRIMARY KEY,
+                title TEXT,
+                summary TEXT,
+                created_at TEXT,
+                source TEXT,
+                matched TEXT,
+                saved_at TEXT,
+                matched_topic TEXT,
+                story_key TEXT,
+                raw_text TEXT,
+                has_ai INTEGER
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS seen (
+                url TEXT PRIMARY KEY,
+                first_seen TEXT,
+                seen_at TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS seen_keys (
+                key TEXT PRIMARY KEY,
+                seen_at TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS feed_state (
+                feed_url TEXT PRIMARY KEY,
+                warmed_up INTEGER DEFAULT 0,
+                warmed_at TEXT
+            )
+        """)
+
+def ensure_feed_state(conn, feed_url: str):
+    conn.execute("INSERT OR IGNORE INTO feed_state(feed_url, warmed_up, warmed_at) VALUES (?,?,?)",
+                 (feed_url, 0, None))
+
+def is_warmed(conn, feed_url: str) -> bool:
+    ensure_feed_state(conn, feed_url)
+    row = conn.execute("SELECT warmed_up FROM feed_state WHERE feed_url=?", (feed_url,)).fetchone()
+    return bool(row and row[0] == 1)
+
+def set_warmed(conn, feed_url: str):
+    conn.execute("UPDATE feed_state SET warmed_up=1, warmed_at=? WHERE feed_url=?",
+                 (now_utc_iso(), feed_url))
+
+def item_key(feed_name: str, entry) -> str:
+    # stable key across reruns
+    guid = getattr(entry, "id", None) or entry.get("guid") or ""
+    link = entry.get("link", "") or ""
+    title = entry.get("title", "") or ""
+    # normalize google news giant urls to still be unique via full link
+    base = f"{feed_name}|{guid}|{link}|{title}".strip()
+    return base
+
+def seen_key(conn, key: str) -> bool:
+    row = conn.execute("SELECT 1 FROM seen_keys WHERE key=? LIMIT 1", (key,)).fetchone()
+    return row is not None
+
+def mark_seen_key(conn, key: str):
+    conn.execute("INSERT OR REPLACE INTO seen_keys(key, seen_at) VALUES (?, ?)", (key, now_utc_iso()))
+
+def mark_seen_url(conn, url: str):
+    # keep both fields for backward compatibility
+    conn.execute("INSERT OR REPLACE INTO seen(url, first_seen, seen_at) VALUES (?, COALESCE((SELECT first_seen FROM seen WHERE url=?), ?), ?)",
+                 (url, url, now_utc_iso(), now_utc_iso()))
+
+def normalize_text(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "")).strip()
+
+def match_topic(title: str, desc: str):
+    """
+    Robust topic matching:
+    - whole-word matching for single terms (avoids matching inside words)
+    - phrase matching for multi-word topics
+    - special handling: "artificial intelligence" matches either phrase or "AI" as a whole word
+    """
+    hay = f"{title}\n{desc}".lower()
+
+    for t in TOPICS:
+        t_l = t.lower()
+
+        if t_l == "artificial intelligence":
+            if "artificial intelligence" in hay or re.search(r"\bai\b", hay):
+                return t
+            continue
+
+        if " " in t_l:
+            if t_l in hay:
+                return t
+        else:
+            if re.search(rf"\b{re.escape(t_l)}\b", hay):
+                return t
+
+    return None
+
+def headline_only_summary(title: str, topic: str):
+    # keep it stable + cheap: headline-only bullets
+    t = normalize_text(title)
+    return "\n".join([
+        f"- [HEADLINE-ONLY] {t}",
+        f"- Matched topic: {topic}",
+        "Why it matters: This may be relevant to your tracked topic; open the link for details."
+    ])
+
+def save_story(conn, title: str, url: str, source: str, matched_topic: str, summary: str, story_key_val: str):
+    # IMPORTANT: only save if it truly matched a topic
+    if not matched_topic:
+        return False
+
+    now = now_utc_iso()
+    conn.execute("""
+        INSERT OR IGNORE INTO stories(
+            url, title, summary, created_at, source, matched, saved_at, matched_topic, story_key, raw_text, has_ai
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    """, (
+        url,
+        normalize_text(title),
+        summary or "",
+        now,
+        source,
+        matched_topic,          # keep backwards-compatible "matched" field
+        now,
+        matched_topic,
+        story_key_val,
+        "",                     # raw_text (optional)
+        1 if matched_topic in AI_TOPICS else 0
+    ))
+    return True
+
+def warm_start_seed(feed_name: str, feed_url: str, seed_n: int = 60):
+    with connect_db() as conn:
+        ensure_feed_state(conn, feed_url)
+        if is_warmed(conn, feed_url):
+            return 0
+
+        f = feedparser.parse(feed_url)
+        seeded = 0
+        for e in f.entries[:seed_n]:
+            key = item_key(feed_name, e)
+            link = e.get("link", "") or ""
+            if key:
+                mark_seen_key(conn, key)
+            if link:
+                mark_seen_url(conn, link)
+            seeded += 1
+
+        set_warmed(conn, feed_url)
+        return seeded
+
+def run_once():
+    total_new = 0
+
+    for feed_name, feed_url in FEEDS:
+        # Warm start only once per feed
+        try:
+            seeded = warm_start_seed(feed_name, feed_url, seed_n=60)
+            if seeded:
+                print(f"WARM START ({feed_name}): seeded {seeded} items as already-seen. (No summaries created.)")
+        except Exception as ex:
+            print(f"[WARN] Warm start failed for {feed_name}: {ex}")
+
+        # Parse feed
+        try:
+            f = feedparser.parse(feed_url)
+        except Exception as ex:
+            print(f"[WARN] Feed parse failed for {feed_name}: {ex}")
+            continue
+
+        with connect_db() as conn:
+            for e in f.entries:
+                title = e.get("title", "") or ""
+                link = e.get("link", "") or ""
+                desc = e.get("summary", "") or e.get("description", "") or ""
+
+                key = item_key(feed_name, e)
+                if not key:
+                    continue
+
+                if seen_key(conn, key):
+                    continue
+
+                # Mark seen immediately to prevent duplicates if something later errors
+                mark_seen_key(conn, key)
+                if link:
+                    mark_seen_url(conn, link)
+
+                matched = match_topic(title, desc)
+
+                # CRITICAL: if it didn't match a topic, skip saving
+                if not matched:
+                    continue
+
+                summary = headline_only_summary(title, matched)
+                print(f"NEW (topic) [{feed_name}]: {normalize_text(title)}")
+                saved = save_story(conn, title, link, feed_name, matched, summary, key)
+                if saved:
+                    print(f"SAVED: {link}")
+                    total_new += 1
+
+    if total_new == 0:
+        print("No new topic stories across feeds.")
+
+def main():
+    init_db()
+
+    print(f"Collector running every {POLL_SECONDS} seconds… (CTRL+C to stop)")
+    print("Feeds: " + ", ".join([n for n, _ in FEEDS]))
+    print("Topics: " + ", ".join(TOPICS))
+    print("AI summaries only for: " + ", ".join(AI_TOPICS))
+
+    while True:
+        run_once()
+        time.sleep(POLL_SECONDS)
+
+if __name__ == "__main__":
+    main()
