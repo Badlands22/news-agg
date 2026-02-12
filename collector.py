@@ -2,27 +2,37 @@
 import re
 import time
 import sqlite3
-import os
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
-from openai import OpenAI
 
 # ---------------- CONFIG ----------------
 POLL_SECONDS = 30
 DB_PATH = "news.db"
+
 FEEDS = [
     {"name": "BBC", "url": "http://feeds.bbci.co.uk/news/rss.xml"},
+    {"name": "BBC World", "url": "http://feeds.bbci.co.uk/news/world/rss.xml"},
     {"name": "CoinDesk", "url": "https://www.coindesk.com/arc/outboundfeeds/rss/"},
     {"name": "The Guardian", "url": "https://www.theguardian.com/rss"},
+    {"name": "RT (Russia Today)", "url": "https://www.rt.com/rss/"},
+    {"name": "The Jerusalem Post", "url": "https://www.jpost.com/rss/rssfeedsfrontpage.aspx"},
+    {"name": "Just the News", "url": "https://justthenews.com/rss.xml"},
+    {"name": "Al Jazeera", "url": "https://www.aljazeera.com/xml/rss/all.xml"},
+    {"name": "Reuters", "url": "http://feeds.reuters.com/reuters/topNews"},
     {"name": "Google News (Trump/Election 24h)", "url": "https://news.google.com/rss/search?q=trump+OR+election+when:1d&hl=en-US&gl=US&ceid=US:en"},
     {"name": "Google News (AI 24h)", "url": "https://news.google.com/rss/search?q=artificial+intelligence+when:1d&hl=en-US&gl=US&ceid=US:en"},
 ]
+
 TOPICS = [
-    "election", "trump", "artificial intelligence", "bitcoin", "russia", "putin",
+    "election", "trump", "bitcoin", "russia", "putin",
     "israel", "saudi", "tulsi", "intelligence community", "fbi", "executive order",
-    "china", "dni", "maduro", "mandelson"
+    "china", "dni", "maduro",
+    "lawsuit", "injunction", "court", "voter", "rico", "conspiracy", "corruption",
+    "election fraud", "conspiracy theory", "qanon", "ufo", "nuclear", "maha",
+    "netanyahu", "erdogan", "lavrov", "iran", "board of peace", "congo", "sahel"
 ]
-AI_SUMMARY_TOPICS = ["election", "trump", "artificial intelligence", "bitcoin", "russia"]
+
+AI_SUMMARY_TOPICS = []
 
 # ---------------- DATABASE SETUP ----------------
 def init_db():
@@ -65,66 +75,35 @@ def normalize_text(text: str) -> str:
     text = re.sub(r'[^\w\s]', '', text)
     return text
 
-def grok_summarize(title: str, description: str, topic: str) -> str:
-    if not os.getenv("XAI_API_KEY"):
-        return f"Summary temporarily unavailable.\n\nMatched topic: {topic}"
-    
-    client = OpenAI(
-        api_key=os.getenv("XAI_API_KEY"),
-        base_url="https://api.x.ai/v1"
-    )
-    
-    prompt = f"""Write a short, clear summary in 2-4 sentences.
-Title: {title}
-Description: {description}
-Focus on key facts and why it matters. No opinions."""
-    
-    try:
-        response = client.chat.completions.create(
-            model="grok-4-1-fast-non-reasoning",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=250,
-            temperature=0.6
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        print(f"Grok error: {e}")
-        return f"Could not summarize right now.\n\nMatched topic: {topic}"
+def headline_only_summary(title: str, desc: str, topic: str):
+    title_clean = normalize_text(title)
+    desc_clean = clean_text(desc or "")
 
-def is_new_article(title: str, link: str, topic: str) -> bool:
+    bullets = [f"- {title_clean}"]
+
+    if desc_clean and len(desc_clean) > 30:
+        sentences = re.split(r'[.!?]+', desc_clean)
+        added = 0
+        for sent in sentences:
+            sent = sent.strip()
+            if len(sent) > 15 and added < 1:
+                similarity = SequenceMatcher(None, sent.lower(), title_clean).ratio()
+                if similarity < 0.55:
+                    bullets.append(f"- {sent}")
+                    added += 1
+
+    bullets.append(f"- Matched topic: {topic}")
+    bullets.append("Why it matters: This may be relevant to your tracked topic; open the link for full details.")
+
+    return "\n".join(bullets)
+
+def is_new_article(link: str) -> bool:
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    
-    # First: check exact link
     c.execute("SELECT 1 FROM articles WHERE link = ?", (link,))
-    if c.fetchone() is not None:
-        conn.close()
-        return False
-    
-    # Second: check similar title in last 48 hours for this topic
-    cleaned_title = normalize_text(title)
-    two_days_ago = (datetime.now(timezone.utc) - timedelta(hours=48)).isoformat()
-    
-    c.execute("""
-        SELECT title FROM articles 
-        WHERE topic = ? 
-        AND added_at > ? 
-        AND link != ?
-    """, (topic, two_days_ago, link))
-    
-    existing_titles = [normalize_text(row[0]) for row in c.fetchall()]
+    exists = c.fetchone() is not None
     conn.close()
-    
-    if not existing_titles:
-        return True
-    
-    for existing in existing_titles:
-        similarity = SequenceMatcher(None, cleaned_title, existing).ratio()
-        if similarity > 0.85:
-            print(f"Skipping similar title (similarity {similarity:.2f}): {title}")
-            return False
-    
-    return True
+    return not exists
 
 def save_article(title, link, desc, pub_date, topic, summary):
     conn = sqlite3.connect(DB_PATH)
@@ -144,13 +123,16 @@ def process_feed(feed_name, url):
     if not hasattr(feed, 'entries') or not feed.entries:
         print(f"No entries found in {feed_name}")
         return
+
     for entry in feed.entries:
         title = entry.get('title', '').strip()
         link = entry.get('link', '').strip()
         desc = entry.get('description', entry.get('summary', '')).strip()
         pub_date = entry.get('published', entry.get('updated', datetime.now(timezone.utc).isoformat()))
+
         if not title or not link:
             continue
+
         matched_topic = None
         norm_title = normalize_text(title)
         norm_desc = normalize_text(desc)
@@ -158,21 +140,24 @@ def process_feed(feed_name, url):
             if topic.lower() in norm_title or topic.lower() in norm_desc:
                 matched_topic = topic
                 break
+
         if not matched_topic:
             continue
+
         print(f"NEW (topic) [{feed_name}]: {title}")
+
         summary = None
         if matched_topic in AI_SUMMARY_TOPICS:
-            print("Generating Grok summary...")
-            summary = grok_summarize(title, desc, matched_topic)
+            summary = headline_only_summary(title, desc, matched_topic)
             print("Generated summary:")
             print(summary)
             print("---")
-        if is_new_article(title, link, matched_topic):
+
+        if is_new_article(link):
             save_article(title, link, desc, pub_date, matched_topic, summary)
             print(f"SAVED: {link}")
         else:
-            print(f"Already seen or too similar: {link}")
+            print(f"Already seen: {link}")
 
 def main():
     print("TEST: Collector started - this should appear in the log!")
@@ -180,6 +165,7 @@ def main():
     print(f"Feeds: {', '.join(f['name'] for f in FEEDS)}")
     print(f"Topics: {', '.join(TOPICS)}")
     print(f"AI summaries only for: {', '.join(AI_SUMMARY_TOPICS)}")
+
     while True:
         try:
             for feed in FEEDS:
