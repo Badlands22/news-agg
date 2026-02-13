@@ -128,6 +128,16 @@ def home():
             </form>
         </div>
 
+        <!-- Ad Banner (static, right below search bar, part of page flow) -->
+        <div class="container mx-auto px-6 pb-6">
+            <div class="max-w-3xl mx-auto mb-8 bg-gray-900 rounded-2xl p-6 text-center text-gray-500 border border-gray-800">
+                <!-- Google AdSense placeholder - leaderboard 728x90 -->
+                <!-- Paste real AdSense code here when ready -->
+                <p>Advertisement / Sponsored Content Placeholder</p>
+                <p class="text-xs mt-1 text-gray-500">(728x90 leaderboard - static, below search bar)</p>
+            </div>
+        </div>
+
         <!-- Stories Grid -->
         <main class="container mx-auto px-6 pb-12">
             <h2 class="text-3xl font-bold mb-8">Latest Stories</h2>
@@ -136,7 +146,7 @@ def home():
                 {% for story in stories %}
                 <div class="bg-gray-900 rounded-2xl overflow-hidden border border-gray-800 hover:border-blue-600 transition">
                     <div class="p-6">
-                        <h3 class="text-xl font-semibold mb-4">{{ story['title'] }}</h3> <!-- No line-clamp - full title -->
+                        <h3 class="text-xl font-semibold mb-4">{{ story['title'] }}</h3>
                         {% if story['summary'] %}
                         <div class="text-gray-400 text-sm whitespace-pre-line leading-relaxed mb-6">
                             {{ story['summary'] | replace('\n', '<br>') | safe }}
@@ -149,7 +159,7 @@ def home():
                             <span class="text-gray-500 text-sm">{{ story['added_at'][:10] }}</span>
                         </div>
                         <a href="{{ story['link'] }}" target="_blank" 
-                           class="mt-6 block text-center bg-blue-600 hover:bg-blue-500 transition py-3 rounded-xl font-medium">
+                           class="mt-6 block text-center bg-red-600 hover:bg-red-500 transition py-3 rounded-xl font-medium">
                             Read Original →
                         </a>
                     </div>
@@ -217,7 +227,7 @@ def topic_page(topic):
                 {% for story in stories %}
                 <div class="bg-gray-900 rounded-2xl overflow-hidden border border-gray-800 hover:border-blue-600 transition">
                     <div class="p-6">
-                        <h3 class="text-xl font-semibold mb-4">{{ story['title'] }}</h3> <!-- No line-clamp - full title -->
+                        <h3 class="text-xl font-semibold mb-4">{{ story['title'] }}</h3>
                         {% if story['summary'] %}
                         <div class="text-gray-400 text-sm whitespace-pre-line leading-relaxed mb-6">
                             {{ story['summary'] | replace('\n', '<br>') | safe }}
@@ -230,7 +240,7 @@ def topic_page(topic):
                             <span class="text-gray-500 text-sm">{{ story['added_at'][:10] }}</span>
                         </div>
                         <a href="{{ story['link'] }}" target="_blank" 
-                           class="mt-6 block text-center bg-blue-600 hover:bg-blue-500 transition py-3 rounded-xl font-medium">
+                           class="mt-6 block text-center bg-red-600 hover:bg-red-500 transition py-3 rounded-xl font-medium">
                             Read Original →
                         </a>
                     </div>
