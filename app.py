@@ -47,12 +47,15 @@ def get_topic_stories(topic, limit=12):
     return rows
 
 def get_all_topics():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT DISTINCT topic FROM articles ORDER BY topic")
-    topics = [row[0] for row in c.fetchall()]
-    conn.close()
-    return topics
+    # Hardcode ALL topics so they always show, even if no stories yet
+    return [
+        "All Topics",
+        "Bitcoin", "China", "Conspiracy", "Corruption", "Court", "Election",
+        "Executive order", "Fbi", "Iran", "Israel", "Lawsuit", "Nuclear",
+        "Putin", "Russia", "Saudi", "Trump", "Voter",
+        "Injunction", "Rico", "Conspiracy Theory", "QAnon", "UFO", "MAHA",
+        "Netanyahu", "Erdogan", "Lavrov", "Iran", "Board of Peace", "Congo", "Sahel"
+    ]
 
 def get_latest_update():
     conn = sqlite3.connect(DB_PATH)
@@ -82,12 +85,34 @@ def home():
             tailwind.config = { darkMode: 'class' }
         </script>
         <style>
-            .tab-active { @apply bg-blue-600 text-white; }
-            .tab-inactive { @apply bg-gray-800 hover:bg-gray-700 text-gray-200; }
+            .tab-button {
+                padding: 0.75rem 1.5rem;
+                border-radius: 9999px;
+                font-weight: 500;
+                transition: all 0.2s ease;
+                box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+            }
+            .tab-active {
+                background-color: #dc2626; /* red-600 */
+                color: white;
+            }
+            .tab-active:hover {
+                background-color: #b91c1c; /* red-700 */
+                transform: translateY(-1px);
+                box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            }
+            .tab-inactive {
+                background-color: #1f2937; /* gray-800 */
+                color: #e2e8f0;
+            }
+            .tab-inactive:hover {
+                background-color: #374151; /* gray-700 */
+                transform: translateY(-1px);
+            }
         </style>
     </head>
     <body class="bg-gray-950 text-gray-200 min-h-screen">
-        <header class="bg-gradient-to-r from-blue-700 to-indigo-800 py-8">
+        <header class="bg-gradient-to-r from-blue-700 to-indigo-800 py-8 shadow-lg">
             <div class="container mx-auto px-6 text-center">
                 <h1 class="text-5xl font-bold">News Aggregator</h1>
                 <p class="mt-2 text-blue-200">Real-time updates on your tracked topics</p>
@@ -95,26 +120,16 @@ def home():
             </div>
         </header>
 
-        <!-- Topic Tabs / Dropdown -->
+        <!-- Topic Tabs (now button-style) -->
         <div class="bg-gray-900 border-b border-gray-800">
             <div class="container mx-auto px-6">
-                <div class="hidden md:flex flex-wrap gap-3 py-4 justify-center">
-                    <a href="/" class="px-5 py-2.5 rounded-full font-medium transition {{ 'tab-active' if not request.args.get('q') else 'tab-inactive' }}">
-                        All Topics
-                    </a>
+                <div class="flex flex-wrap gap-4 py-6 justify-center">
                     {% for t in topics %}
-                    <a href="/topic/{{ t | urlencode }}" class="px-5 py-2.5 rounded-full font-medium transition {{ 'tab-active' if t == request.view_args.get('topic') else 'tab-inactive' }}">
-                        {{ t | capitalize }}
+                    <a href="{{ '/' if t == 'All Topics' else '/topic/' + t | urlencode }}" 
+                       class="tab-button {{ 'tab-active' if (t == 'All Topics' and not request.args.get('q') and not request.view_args.get('topic')) or (t == request.view_args.get('topic')) else 'tab-inactive' }}">
+                        {{ t }}
                     </a>
                     {% endfor %}
-                </div>
-                <div class="md:hidden">
-                    <select onchange="window.location.href=this.value" class="w-full bg-gray-800 border border-gray-700 rounded-full px-5 py-3 text-lg">
-                        <option value="/">All Topics</option>
-                        {% for t in topics %}
-                        <option value="/topic/{{ t | urlencode }}" {{ 'selected' if t == request.view_args.get('topic') else '' }}>{{ t | capitalize }}</option>
-                        {% endfor %}
-                    </select>
                 </div>
             </div>
         </div>
@@ -128,11 +143,9 @@ def home():
             </form>
         </div>
 
-        <!-- Ad Banner (static, right below search bar, part of page flow) -->
+        <!-- Ad Banner (static, below search bar) -->
         <div class="container mx-auto px-6 pb-6">
             <div class="max-w-3xl mx-auto mb-8 bg-gray-900 rounded-2xl p-6 text-center text-gray-500 border border-gray-800">
-                <!-- Google AdSense placeholder - leaderboard 728x90 -->
-                <!-- Paste real AdSense code here when ready -->
                 <p>Advertisement / Sponsored Content Placeholder</p>
                 <p class="text-xs mt-1 text-gray-500">(728x90 leaderboard - static, below search bar)</p>
             </div>
@@ -213,7 +226,7 @@ def topic_page(topic):
                         All Topics
                     </a>
                     {% for t in topics %}
-                    <a href="/topic/{{ t | urlencode }}" class="px-6 py-2.5 rounded-full font-medium transition {{ 'bg-blue-600 text-white' if t == topic else 'bg-gray-800 hover:bg-gray-700' }}">
+                    <a href="/topic/{{ t | urlencode }}" class="px-6 py-2.5 rounded-full font-medium transition {{ 'bg-red-600 text-white' if t == topic else 'bg-gray-800 hover:bg-gray-700' }}">
                         {{ t | capitalize }}
                     </a>
                     {% endfor %}
