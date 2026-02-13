@@ -47,14 +47,13 @@ def get_topic_stories(topic, limit=12):
     return rows
 
 def get_all_topics():
-    # Hardcode ALL topics so they always show, even if no stories yet
+    # Hardcoded full list so all topics always show
     return [
-        "All Topics",
-        "Bitcoin", "China", "Conspiracy", "Corruption", "Court", "Election",
+        "All Topics", "Bitcoin", "China", "Conspiracy", "Corruption", "Court", "Election",
         "Executive order", "Fbi", "Iran", "Israel", "Lawsuit", "Nuclear",
         "Putin", "Russia", "Saudi", "Trump", "Voter",
         "Injunction", "Rico", "Conspiracy Theory", "QAnon", "UFO", "MAHA",
-        "Netanyahu", "Erdogan", "Lavrov", "Iran", "Board of Peace", "Congo", "Sahel"
+        "Netanyahu", "Erdogan", "Lavrov", "Board of Peace", "Congo", "Sahel"
     ]
 
 def get_latest_update():
@@ -84,32 +83,6 @@ def home():
         <script>
             tailwind.config = { darkMode: 'class' }
         </script>
-        <style>
-            .tab-button {
-                padding: 0.75rem 1.5rem;
-                border-radius: 9999px;
-                font-weight: 500;
-                transition: all 0.2s ease;
-                box-shadow: 0 1px 3px rgba(0,0,0,0.2);
-            }
-            .tab-active {
-                background-color: #dc2626; /* red-600 */
-                color: white;
-            }
-            .tab-active:hover {
-                background-color: #b91c1c; /* red-700 */
-                transform: translateY(-1px);
-                box-shadow: 0 4px 6px rgba(0,0,0,0.3);
-            }
-            .tab-inactive {
-                background-color: #1f2937; /* gray-800 */
-                color: #e2e8f0;
-            }
-            .tab-inactive:hover {
-                background-color: #374151; /* gray-700 */
-                transform: translateY(-1px);
-            }
-        </style>
     </head>
     <body class="bg-gray-950 text-gray-200 min-h-screen">
         <header class="bg-gradient-to-r from-blue-700 to-indigo-800 py-8 shadow-lg">
@@ -120,16 +93,26 @@ def home():
             </div>
         </header>
 
-        <!-- Topic Tabs (now button-style) -->
+        <!-- Topic Tabs / Dropdown -->
         <div class="bg-gray-900 border-b border-gray-800">
             <div class="container mx-auto px-6">
-                <div class="flex flex-wrap gap-4 py-6 justify-center">
+                <div class="hidden md:flex flex-wrap gap-3 py-4 justify-center">
+                    <a href="/" class="px-5 py-2.5 rounded-full font-medium transition {{ 'bg-red-600 text-white' if not request.args.get('q') else 'bg-gray-800 hover:bg-gray-700' }}">
+                        All Topics
+                    </a>
                     {% for t in topics %}
-                    <a href="{{ '/' if t == 'All Topics' else '/topic/' + t | urlencode }}" 
-                       class="tab-button {{ 'tab-active' if (t == 'All Topics' and not request.args.get('q') and not request.view_args.get('topic')) or (t == request.view_args.get('topic')) else 'tab-inactive' }}">
-                        {{ t }}
+                    <a href="/topic/{{ t | urlencode }}" class="px-5 py-2.5 rounded-full font-medium transition {{ 'bg-red-600 text-white' if t == request.view_args.get('topic') else 'bg-gray-800 hover:bg-gray-700' }}">
+                        {{ t | capitalize }}
                     </a>
                     {% endfor %}
+                </div>
+                <div class="md:hidden">
+                    <select onchange="window.location.href=this.value" class="w-full bg-gray-800 border border-gray-700 rounded-full px-5 py-3 text-lg">
+                        <option value="/">All Topics</option>
+                        {% for t in topics %}
+                        <option value="/topic/{{ t | urlencode }}" {{ 'selected' if t == request.view_args.get('topic') else '' }}>{{ t | capitalize }}</option>
+                        {% endfor %}
+                    </select>
                 </div>
             </div>
         </div>
@@ -143,7 +126,7 @@ def home():
             </form>
         </div>
 
-        <!-- Ad Banner (static, below search bar) -->
+        <!-- Ad Banner (static, right below search bar, part of page flow) -->
         <div class="container mx-auto px-6 pb-6">
             <div class="max-w-3xl mx-auto mb-8 bg-gray-900 rounded-2xl p-6 text-center text-gray-500 border border-gray-800">
                 <p>Advertisement / Sponsored Content Placeholder</p>
