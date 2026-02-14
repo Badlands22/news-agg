@@ -4,5 +4,8 @@ feedparser
 gunicorn
 psycopg[binary]
 xai-sdk
+requests
+beautifulsoup4
+
 
 
