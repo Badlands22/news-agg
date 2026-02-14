@@ -6,17 +6,32 @@ import sqlite3
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 
-# Postgres driver (Render)
-# NOTE: you must add psycopg[binary] to requirements.txt
+# ---------------- Postgres (Render) ----------------
+# NOTE: requirements.txt must include: psycopg[binary]
 try:
     import psycopg
 except Exception:
     psycopg = None
 
-# ---------------- CONFIG ----------------
 POLL_SECONDS = 30
 DB_PATH = "news.db"  # used only when DATABASE_URL is not set
 DATABASE_URL = os.getenv("DATABASE_URL")  # set on Render for Postgres
+
+
+# ---------------- xAI (Grok) summaries ----------------
+# NOTE: requirements.txt must include: xai-sdk
+try:
+    from xai_sdk import Client
+    from xai_sdk.chat import user, system
+except Exception:
+    Client = None
+    user = None
+    system = None
+
+XAI_API_KEY = os.getenv("XAI_API_KEY")
+XAI_MODEL = os.getenv("XAI_MODEL", "grok-4")
+_xai_client = None
+
 
 FEEDS = [
     {"name": "BBC", "url": "http://feeds.bbci.co.uk/news/rss.xml"},
@@ -41,8 +56,10 @@ TOPICS = [
     "netanyahu", "erdogan", "lavrov", "iran", "board of peace", "congo", "sahel"
 ]
 
-# ✅ TURN ON "AI-style" bullet summaries for ALL topics
-AI_SUMMARY_TOPICS = TOPICS
+# Turn on xAI summaries only for these topics (easy to adjust)
+AI_SUMMARY_TOPICS = [
+    "election", "trump", "russia", "china", "israel", "iran", "bitcoin", "ai", "nuclear"
+]
 
 
 # ---------------- DATABASE HELPERS ----------------
@@ -145,12 +162,9 @@ def clean_text(text: str) -> str:
     text = re.sub(r'&lt;', '<', text)
     text = re.sub(r'&gt;', '>', text)
     text = re.sub(r'&quot;', '"', text)
-    # remove weird invisible chars
     text = re.sub(r'[\xa0\u200b\u200c\u200d]', ' ', text)
-
     publishers = r'(?:AOL\.com|The New York Times|CNN\.com|MSN|Oman Observer|매일경제|openPR\.com|Facebook|China Daily|The Motley Fool|The Guardian|The Times of Israel|CTech|igor´sLAB|AOL|Springer Professional|Bitget|Unite\.AI|Vocal\.media|Press of Atlantic City|Stock Traders Daily|The Globe and Mail|Haaretz|abudhabi-news\.com|Insider Monkey|Far Out Magazine|Telegrafi|Reuters)'
     text = re.sub(rf'\s*(?:-|\||–|—)?\s*{publishers}$', '', text, flags=re.IGNORECASE)
-
     text = re.sub(r'\s+', ' ', text).strip()
     text = re.sub(r'(\b\w+\b\s*)\1+', r'\1', text)
     return text
@@ -163,13 +177,11 @@ def normalize_text(text: str) -> str:
     return text
 
 
-def headline_only_summary(title: str, desc: str, topic: str) -> str:
-    # ✅ Keep title readable (don’t lowercase/strip punctuation)
-    title_display = clean_text(title)
-    title_norm = normalize_text(title)
+def headline_only_summary(title: str, desc: str, topic: str):
+    title_clean = normalize_text(title)
     desc_clean = clean_text(desc or "")
 
-    bullets = [f"- {title_display}"]
+    bullets = [f"- {title_clean}"]
 
     if desc_clean and len(desc_clean) > 30:
         sentences = re.split(r'[.!?]+', desc_clean)
@@ -177,7 +189,7 @@ def headline_only_summary(title: str, desc: str, topic: str) -> str:
         for sent in sentences:
             sent = sent.strip()
             if len(sent) > 15 and added < 1:
-                similarity = SequenceMatcher(None, sent.lower(), title_norm).ratio()
+                similarity = SequenceMatcher(None, sent.lower(), title_clean).ratio()
                 if similarity < 0.55:
                     bullets.append(f"- {sent}")
                     added += 1
@@ -186,6 +198,49 @@ def headline_only_summary(title: str, desc: str, topic: str) -> str:
     bullets.append("Why it matters: This may be relevant to your tracked topic; open the link for full details.")
 
     return "\n".join(bullets)
+
+
+# ---------------- xAI SUMMARIZER ----------------
+def xai_summary(title: str, desc: str, feed_name: str, topic: str):
+    """
+    Uses xAI (Grok) to generate a short, high-signal summary.
+    Returns None if not configured, so we can safely fall back.
+    """
+    global _xai_client
+
+    if not XAI_API_KEY or Client is None:
+        return None
+
+    if _xai_client is None:
+        _xai_client = Client(api_key=XAI_API_KEY, timeout=60)
+
+    prompt = f"""Summarize this news item for a monitoring dashboard.
+
+Rules:
+- Do NOT restate the headline verbatim.
+- Be specific (who/what/where), using the snippet if present.
+- If the snippet is thin, say what is unknown.
+- Output EXACTLY:
+  1) One-sentence summary
+  2) 3 bullets labeled: Key details / Why it matters / What to watch next
+
+INPUT:
+Source: {feed_name}
+Topic matched: {topic}
+Title: {title}
+Snippet: {desc}
+"""
+
+    try:
+        chat = _xai_client.chat.create(model=XAI_MODEL)
+        chat.append(system("You write concise, high-signal news summaries."))
+        chat.append(user(prompt))
+        resp = chat.sample()
+        text = (resp.content or "").strip()
+        return text if text else None
+    except Exception as e:
+        print(f"xAI summary error: {e}")
+        return None
 
 
 # ---------------- MAIN LOGIC ----------------
@@ -208,6 +263,7 @@ def process_feed(feed_name, url):
         matched_topic = None
         norm_title = normalize_text(title)
         norm_desc = normalize_text(desc)
+
         for topic in TOPICS:
             if topic.lower() in norm_title or topic.lower() in norm_desc:
                 matched_topic = topic
@@ -220,10 +276,13 @@ def process_feed(feed_name, url):
 
         summary = None
         if matched_topic in AI_SUMMARY_TOPICS:
-            summary = headline_only_summary(title, desc, matched_topic)
-            print("Generated summary:")
-            print(summary)
-            print("---")
+            summary = xai_summary(title, desc, feed_name, matched_topic)
+            if summary:
+                print("Generated xAI summary:")
+                print(summary)
+                print("---")
+            else:
+                summary = headline_only_summary(title, desc, matched_topic)
 
         if is_new_article(link):
             save_article(title, link, desc, pub_date, matched_topic, summary)
@@ -234,15 +293,22 @@ def process_feed(feed_name, url):
 
 def main():
     db_mode = "Postgres (DATABASE_URL)" if using_postgres() else f"SQLite ({DB_PATH})"
-    print("TEST: Collector started - this should appear in the log!")
+    print("Collector started.")
     print(f"DB mode: {db_mode}")
+
     if using_postgres():
-        safe = re.sub(r"://([^:]+):([^@]+)@", r"://\1:***@", DATABASE_URL or "")
+        safe = re.sub(r"://([^:]+):([^@]+)@", r"://\\1:***@", DATABASE_URL or "")
         print(f"DATABASE_URL seen by collector: {safe}")
+
+    if XAI_API_KEY:
+        print(f"xAI enabled. Model: {XAI_MODEL}")
+    else:
+        print("xAI not enabled (XAI_API_KEY not set). Summaries will fallback or be None.")
+
     print(f"Collector running every {POLL_SECONDS} seconds… (CTRL+C to stop)")
     print(f"Feeds: {', '.join(f['name'] for f in FEEDS)}")
     print(f"Topics: {', '.join(TOPICS)}")
-    print(f"AI summaries enabled for: {', '.join(AI_SUMMARY_TOPICS)}")
+    print(f"AI summaries for: {', '.join(AI_SUMMARY_TOPICS)}")
 
     while True:
         try:
