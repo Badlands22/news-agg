@@ -16,27 +16,8 @@ def pg_connect():
     return psycopg.connect(DATABASE_URL, row_factory=dict_row)
 
 
-def to_utc_iso(ts):
-    """
-    Returns ISO-8601 UTC string like '2026-02-14T03:22:00Z' or ''.
-    """
-    if not ts:
-        return ""
-    if isinstance(ts, datetime):
-        dt = ts
-    else:
-        dt = datetime.fromisoformat(str(ts))
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    dt = dt.astimezone(timezone.utc)
-    # seconds precision is plenty
-    return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
 def fmt_utc_fallback(ts):
-    """
-    What the server prints if JS is off. Still looks fine.
-    """
+    # server-side fallback if JS is disabled
     if not ts:
         return ""
     try:
@@ -52,9 +33,7 @@ def fmt_utc_fallback(ts):
 
 def attach_display_fields(rows):
     for r in rows:
-        ts = r.get("added_at")
-        r["added_at_iso"] = to_utc_iso(ts)            # used by JS to localize
-        r["added_at_display"] = fmt_utc_fallback(ts)  # server-side fallback
+        r["added_at_display"] = fmt_utc_fallback(r.get("added_at"))
     return rows
 
 
@@ -63,7 +42,9 @@ def get_recent_stories(limit=12, search=None):
         with conn.cursor() as c:
             if search:
                 query = """
-                    SELECT title, link, topic, summary, added_at
+                    SELECT
+                        title, link, topic, summary, added_at,
+                        (EXTRACT(EPOCH FROM added_at) * 1000)::BIGINT AS added_at_ms
                     FROM public.articles
                     WHERE title ILIKE %s
                        OR topic ILIKE %s
@@ -75,7 +56,9 @@ def get_recent_stories(limit=12, search=None):
                 c.execute(query, (term, term, term, limit))
             else:
                 c.execute("""
-                    SELECT title, link, topic, summary, added_at
+                    SELECT
+                        title, link, topic, summary, added_at,
+                        (EXTRACT(EPOCH FROM added_at) * 1000)::BIGINT AS added_at_ms
                     FROM public.articles
                     ORDER BY added_at DESC
                     LIMIT %s
@@ -88,7 +71,9 @@ def get_topic_stories(topic, limit=12):
     with pg_connect() as conn:
         with conn.cursor() as c:
             c.execute("""
-                SELECT title, link, topic, summary, added_at
+                SELECT
+                    title, link, topic, summary, added_at,
+                    (EXTRACT(EPOCH FROM added_at) * 1000)::BIGINT AS added_at_ms
                 FROM public.articles
                 WHERE topic = %s
                 ORDER BY added_at DESC
@@ -111,12 +96,18 @@ def get_all_topics():
 def get_latest_update():
     with pg_connect() as conn:
         with conn.cursor() as c:
-            c.execute("SELECT MAX(added_at) AS max_added_at FROM public.articles;")
-            row = c.fetchone()
-            ts = row["max_added_at"] if row else None
+            c.execute("""
+                SELECT
+                    MAX(added_at) AS max_added_at,
+                    (EXTRACT(EPOCH FROM MAX(added_at)) * 1000)::BIGINT AS max_added_at_ms
+                FROM public.articles;
+            """)
+            row = c.fetchone() or {}
+            ts = row.get("max_added_at")
+            ms = row.get("max_added_at_ms")
             return {
-                "iso": to_utc_iso(ts),
-                "display": fmt_utc_fallback(ts) if ts else "Never"
+                "display": fmt_utc_fallback(ts) if ts else "Never",
+                "ms": ms if ms else ""
             }
 
 
@@ -138,34 +129,6 @@ def home():
         <script>
             tailwind.config = { darkMode: 'class' }
         </script>
-
-        <script>
-        // Convert UTC ISO timestamps to the visitor's local time
-        function formatLocal(iso) {
-            if (!iso) return "";
-            const d = new Date(iso);
-            if (isNaN(d.getTime())) return "";
-            const pad = (n) => String(n).padStart(2, "0");
-            return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-        }
-
-        document.addEventListener("DOMContentLoaded", () => {
-            // Last updated
-            const lu = document.querySelector("[data-last-updated-utc]");
-            if (lu) {
-                const iso = lu.getAttribute("data-last-updated-utc");
-                const local = formatLocal(iso);
-                if (local) lu.textContent = local;
-            }
-
-            // Story timestamps
-            document.querySelectorAll("[data-utc]").forEach(el => {
-                const iso = el.getAttribute("data-utc");
-                const local = formatLocal(iso);
-                if (local) el.textContent = local;
-            });
-        });
-        </script>
     </head>
     <body class="bg-gray-950 text-gray-200 min-h-screen">
         <header class="bg-gradient-to-r from-blue-700 to-indigo-800 py-8 shadow-lg">
@@ -174,7 +137,8 @@ def home():
                 <p class="mt-2 text-blue-200">Real-time updates on your tracked topics</p>
                 <p class="mt-1 text-sm text-blue-300">
                     Last updated:
-                    <span data-last-updated-utc="{{ last_updated_iso }}">{{ last_updated }}</span>
+                    <span id="last-updated"
+                          data-ms="{{ last_updated_ms }}">{{ last_updated }}</span>
                 </p>
             </div>
         </header>
@@ -212,7 +176,7 @@ def home():
             </form>
         </div>
 
-        <!-- Ad Banner (static, right below search bar, part of page flow) -->
+        <!-- Ad Banner -->
         <div class="container mx-auto px-6 pb-6">
             <div class="max-w-3xl mx-auto mb-8 bg-gray-900 rounded-2xl p-6 text-center text-gray-500 border border-gray-800">
                 <p>Advertisement / Sponsored Content Placeholder</p>
@@ -238,8 +202,8 @@ def home():
                             <span class="bg-blue-900 text-blue-300 px-4 py-1 rounded-full text-xs font-medium">
                                 {{ story['topic'] | capitalize }}
                             </span>
-                            <span class="text-gray-500 text-sm"
-                                  data-utc="{{ story['added_at_iso'] }}">
+                            <span class="text-gray-500 text-sm story-time"
+                                  data-ms="{{ story['added_at_ms'] }}">
                                 {{ story['added_at_display'] }}
                             </span>
                         </div>
@@ -259,6 +223,33 @@ def home():
         <footer class="bg-gray-950 py-8 text-center text-gray-500 text-sm">
             © {{ now_year }} News Aggregator
         </footer>
+
+        <!-- Put JS at the very bottom so it definitely runs after elements exist -->
+        <script>
+        function pad(n){ return String(n).padStart(2, "0"); }
+        function formatLocalFromMs(ms){
+            if (!ms) return "";
+            const d = new Date(Number(ms));
+            if (isNaN(d.getTime())) return "";
+            // Local time (viewer’s timezone)
+            return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        }
+
+        // Last updated
+        const lu = document.getElementById("last-updated");
+        if (lu) {
+            const ms = lu.getAttribute("data-ms");
+            const local = formatLocalFromMs(ms);
+            if (local) lu.textContent = local;
+        }
+
+        // Story timestamps
+        document.querySelectorAll(".story-time").forEach(el => {
+            const ms = el.getAttribute("data-ms");
+            const local = formatLocalFromMs(ms);
+            if (local) el.textContent = local;
+        });
+        </script>
     </body>
     </html>
     """
@@ -268,7 +259,7 @@ def home():
         stories=stories,
         topics=topics,
         last_updated=last["display"],
-        last_updated_iso=last["iso"],
+        last_updated_ms=last["ms"],
         now_year=now_year
     )
 
@@ -279,6 +270,7 @@ def topic_page(topic):
     topics = get_all_topics()
     last = get_latest_update()
 
+    # Keep page layout identical to your current one:
     html = """
     <!DOCTYPE html>
     <html lang="en" class="dark">
@@ -290,29 +282,6 @@ def topic_page(topic):
         <script>
             tailwind.config = { darkMode: 'class' }
         </script>
-
-        <script>
-        function formatLocal(iso) {
-            if (!iso) return "";
-            const d = new Date(iso);
-            if (isNaN(d.getTime())) return "";
-            const pad = (n) => String(n).padStart(2, "0");
-            return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-        }
-        document.addEventListener("DOMContentLoaded", () => {
-            const lu = document.querySelector("[data-last-updated-utc]");
-            if (lu) {
-                const iso = lu.getAttribute("data-last-updated-utc");
-                const local = formatLocal(iso);
-                if (local) lu.textContent = local;
-            }
-            document.querySelectorAll("[data-utc]").forEach(el => {
-                const iso = el.getAttribute("data-utc");
-                const local = formatLocal(iso);
-                if (local) el.textContent = local;
-            });
-        });
-        </script>
     </head>
     <body class="bg-gray-950 text-gray-200 min-h-screen">
         <header class="bg-gradient-to-r from-blue-700 to-indigo-800 py-8">
@@ -321,7 +290,8 @@ def topic_page(topic):
                 <p class="mt-2 text-blue-200">Real-time updates on your tracked topics</p>
                 <p class="mt-1 text-sm text-blue-300">
                     Last updated:
-                    <span data-last-updated-utc="{{ last_updated_iso }}">{{ last_updated }}</span>
+                    <span id="last-updated"
+                          data-ms="{{ last_updated_ms }}">{{ last_updated }}</span>
                 </p>
             </div>
         </header>
@@ -357,8 +327,8 @@ def topic_page(topic):
                             <span class="bg-blue-900 text-blue-300 px-4 py-1 rounded-full text-xs font-medium">
                                 {{ story['topic'] | capitalize }}
                             </span>
-                            <span class="text-gray-500 text-sm"
-                                  data-utc="{{ story['added_at_iso'] }}">
+                            <span class="text-gray-500 text-sm story-time"
+                                  data-ms="{{ story['added_at_ms'] }}">
                                 {{ story['added_at_display'] }}
                             </span>
                         </div>
@@ -375,6 +345,29 @@ def topic_page(topic):
         <footer class="bg-gray-950 py-8 text-center text-gray-500 text-sm">
             © {{ now_year }} News Aggregator
         </footer>
+
+        <script>
+        function pad(n){ return String(n).padStart(2, "0"); }
+        function formatLocalFromMs(ms){
+            if (!ms) return "";
+            const d = new Date(Number(ms));
+            if (isNaN(d.getTime())) return "";
+            return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        }
+
+        const lu = document.getElementById("last-updated");
+        if (lu) {
+            const ms = lu.getAttribute("data-ms");
+            const local = formatLocalFromMs(ms);
+            if (local) lu.textContent = local;
+        }
+
+        document.querySelectorAll(".story-time").forEach(el => {
+            const ms = el.getAttribute("data-ms");
+            const local = formatLocalFromMs(ms);
+            if (local) el.textContent = local;
+        });
+        </script>
     </body>
     </html>
     """
@@ -385,7 +378,8 @@ def topic_page(topic):
         topics=topics,
         topic=topic,
         last_updated=last["display"],
-        last_updated_iso=last["iso"],
+        last_updated_ms=last["ms"],
+        last_updated_ms=last["ms"],
         now_year=now_year
     )
 
