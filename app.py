@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import time
 from datetime import datetime, timezone
 
 from flask import Flask, render_template_string, request
@@ -15,6 +16,12 @@ app = Flask(__name__)
 DB_PATH = os.getenv("DB_PATH", "news.db")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+PAGE_SIZE_DEFAULT = 12
+
+# Small in-process cache to prevent hammering DB during deploy/health checks
+CACHE_TTL_SECONDS = 10
+_cache = {}  # key -> (expires_epoch, value)
+
 
 # ---------------- DB helpers ----------------
 def using_postgres() -> bool:
@@ -22,58 +29,94 @@ def using_postgres() -> bool:
 
 
 def pg_connect():
+    """
+    Important: fail fast. Render will kill the service if requests hang.
+    statement_timeout is in ms.
+    """
     if psycopg is None:
         raise RuntimeError("psycopg is not installed. Add psycopg[binary] to requirements.txt")
-    # connect_timeout prevents long hangs that can make Render think the service is down
-    return psycopg.connect(DATABASE_URL, connect_timeout=5)
+
+    # statement_timeout=5000 => any query taking >5s aborts instead of hanging forever
+    return psycopg.connect(
+        DATABASE_URL,
+        connect_timeout=5,
+        options="-c statement_timeout=5000",
+        application_name="news_agg",
+    )
 
 
 def sqlite_connect():
     return sqlite3.connect(DB_PATH)
 
 
+def _cache_get(key):
+    item = _cache.get(key)
+    if not item:
+        return None
+    exp, val = item
+    if time.time() > exp:
+        _cache.pop(key, None)
+        return None
+    return val
+
+
+def _cache_set(key, val, ttl=CACHE_TTL_SECONDS):
+    _cache[key] = (time.time() + ttl, val)
+
+
 def fetch_rows(query: str, params: tuple = ()):
     """
     Return list[dict] rows for both Postgres and SQLite.
+    Fail-fast on errors so the web request still returns quickly.
     """
-    if using_postgres():
-        with pg_connect() as conn:
-            with conn.cursor() as c:
-                c.execute(query, params)
-                cols = [d[0] for d in c.description]
-                return [dict(zip(cols, row)) for row in c.fetchall()]
-    else:
-        conn = sqlite_connect()
-        conn.row_factory = sqlite3.Row
-        c = conn.cursor()
-        c.execute(query, params)
-        rows = [dict(r) for r in c.fetchall()]
-        conn.close()
-        return rows
+    try:
+        if using_postgres():
+            with pg_connect() as conn:
+                with conn.cursor() as c:
+                    c.execute(query, params)
+                    cols = [d[0] for d in c.description]
+                    return [dict(zip(cols, row)) for row in c.fetchall()]
+        else:
+            conn = sqlite_connect()
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            c.execute(query, params)
+            rows = [dict(r) for r in c.fetchall()]
+            conn.close()
+            return rows
+    except Exception as e:
+        print(f"[DB] fetch_rows error: {e}")
+        return []
 
 
 def fetch_one(query: str, params: tuple = ()):
-    if using_postgres():
-        with pg_connect() as conn:
-            with conn.cursor() as c:
-                c.execute(query, params)
-                row = c.fetchone()
-                return row[0] if row else None
-    else:
-        conn = sqlite_connect()
-        c = conn.cursor()
-        c.execute(query, params)
-        row = c.fetchone()
-        conn.close()
-        return row[0] if row else None
+    try:
+        if using_postgres():
+            with pg_connect() as conn:
+                with conn.cursor() as c:
+                    c.execute(query, params)
+                    row = c.fetchone()
+                    return row[0] if row else None
+        else:
+            conn = sqlite_connect()
+            c = conn.cursor()
+            c.execute(query, params)
+            row = c.fetchone()
+            conn.close()
+            return row[0] if row else None
+    except Exception as e:
+        print(f"[DB] fetch_one error: {e}")
+        return None
 
 
 # ---------------- Queries ----------------
-PAGE_SIZE_DEFAULT = 12
-
-
 def get_recent_stories(limit=12, search=None, page=1):
     offset = max(page - 1, 0) * limit
+
+    cache_key = ("recent", limit, search or "", page, "pg" if using_postgres() else "sqlite")
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
 
     if search:
         term = f"%{search}%"
@@ -85,7 +128,7 @@ def get_recent_stories(limit=12, search=None, page=1):
                 ORDER BY added_at DESC
                 LIMIT %s OFFSET %s
             """
-            return fetch_rows(q, (term, term, term, limit, offset))
+            rows = fetch_rows(q, (term, term, term, limit, offset))
         else:
             q = """
                 SELECT title, link, topic, summary, added_at
@@ -94,7 +137,7 @@ def get_recent_stories(limit=12, search=None, page=1):
                 ORDER BY added_at DESC
                 LIMIT ? OFFSET ?
             """
-            return fetch_rows(q, (term, term, term, limit, offset))
+            rows = fetch_rows(q, (term, term, term, limit, offset))
     else:
         if using_postgres():
             q = """
@@ -103,7 +146,7 @@ def get_recent_stories(limit=12, search=None, page=1):
                 ORDER BY added_at DESC
                 LIMIT %s OFFSET %s
             """
-            return fetch_rows(q, (limit, offset))
+            rows = fetch_rows(q, (limit, offset))
         else:
             q = """
                 SELECT title, link, topic, summary, added_at
@@ -111,11 +154,19 @@ def get_recent_stories(limit=12, search=None, page=1):
                 ORDER BY added_at DESC
                 LIMIT ? OFFSET ?
             """
-            return fetch_rows(q, (limit, offset))
+            rows = fetch_rows(q, (limit, offset))
+
+    _cache_set(cache_key, rows)
+    return rows
 
 
 def get_topic_stories(topic, limit=12, page=1):
     offset = max(page - 1, 0) * limit
+
+    cache_key = ("topic", topic, limit, page, "pg" if using_postgres() else "sqlite")
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
 
     if using_postgres():
         q = """
@@ -125,7 +176,7 @@ def get_topic_stories(topic, limit=12, page=1):
             ORDER BY added_at DESC
             LIMIT %s OFFSET %s
         """
-        return fetch_rows(q, (topic, limit, offset))
+        rows = fetch_rows(q, (topic, limit, offset))
     else:
         q = """
             SELECT title, link, topic, summary, added_at
@@ -134,39 +185,45 @@ def get_topic_stories(topic, limit=12, page=1):
             ORDER BY added_at DESC
             LIMIT ? OFFSET ?
         """
-        return fetch_rows(q, (topic, limit, offset))
+        rows = fetch_rows(q, (topic, limit, offset))
+
+    _cache_set(cache_key, rows)
+    return rows
 
 
 def get_latest_update_iso():
-    if using_postgres():
-        q = "SELECT MAX(added_at) FROM public.articles"
-    else:
-        q = "SELECT MAX(added_at) FROM articles"
+    cache_key = ("latest_update", "pg" if using_postgres() else "sqlite")
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    q = "SELECT MAX(added_at) FROM public.articles" if using_postgres() else "SELECT MAX(added_at) FROM articles"
     val = fetch_one(q)
+
     if not val:
+        _cache_set(cache_key, None)
         return None
 
-    # Postgres returns datetime already; SQLite returns string
+    # Postgres returns datetime; SQLite returns string
     if isinstance(val, datetime):
-        # ensure tz-aware and ISO
         dt = val
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc).isoformat()
+        iso = dt.astimezone(timezone.utc).isoformat()
     else:
-        # assume ISO-ish string
         try:
-            # SQLite often stores ISO string
-            dt = datetime.fromisoformat(val.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(str(val).replace("Z", "+00:00"))
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
-            return dt.astimezone(timezone.utc).isoformat()
+            iso = dt.astimezone(timezone.utc).isoformat()
         except Exception:
-            return None
+            iso = None
+
+    _cache_set(cache_key, iso)
+    return iso
 
 
 def get_all_topics():
-    # Keep your full list (including All Topics shown separately in UI)
     return [
         "Bitcoin", "China", "Conspiracy", "Corruption", "Court", "Election",
         "Executive order", "Fbi", "Iran", "Israel", "Lawsuit", "Nuclear",
@@ -176,7 +233,7 @@ def get_all_topics():
     ]
 
 
-# ---------------- Fast health endpoint (Render) ----------------
+# ---------------- Fast health endpoint (NO DB!) ----------------
 @app.get("/health")
 def health():
     return "ok", 200
@@ -186,18 +243,11 @@ def health():
 @app.route("/")
 def home():
     q = request.args.get("q", "").strip()
-    page = int(request.args.get("page", "1") or "1")
-    page = max(page, 1)
+    page = max(int(request.args.get("page", "1") or "1"), 1)
 
     topics = get_all_topics()
     last_updated_iso = get_latest_update_iso()
-
-    stories = get_recent_stories(
-        limit=PAGE_SIZE_DEFAULT,
-        search=q if q else None,
-        page=page
-    )
-
+    stories = get_recent_stories(limit=PAGE_SIZE_DEFAULT, search=q if q else None, page=page)
     now_year = datetime.now().year
 
     html = """
@@ -229,7 +279,6 @@ def home():
             </div>
         </header>
 
-        <!-- Topic Tabs / Dropdown -->
         <div class="bg-gray-900 border-b border-gray-800">
             <div class="container mx-auto px-6">
                 <div class="hidden md:flex flex-wrap gap-3 py-4 justify-center">
@@ -244,6 +293,7 @@ def home():
                     </a>
                     {% endfor %}
                 </div>
+
                 <div class="md:hidden py-4">
                     <select onchange="window.location.href=this.value"
                             class="w-full bg-gray-800 border border-gray-700 rounded-full px-5 py-3 text-lg">
@@ -258,7 +308,6 @@ def home():
             </div>
         </div>
 
-        <!-- Search Bar -->
         <div class="container mx-auto px-6 py-6">
             <form method="GET" class="max-w-3xl mx-auto">
                 <input type="text" name="q" value="{{ q }}"
@@ -267,7 +316,6 @@ def home():
             </form>
         </div>
 
-        <!-- Ad Banner -->
         <div class="container mx-auto px-6 pb-6">
             <div class="max-w-3xl mx-auto mb-8 bg-gray-900 rounded-2xl p-6 text-center text-gray-500 border border-gray-800">
                 <p>Advertisement / Sponsored Content Placeholder</p>
@@ -275,7 +323,6 @@ def home():
             </div>
         </div>
 
-        <!-- Stories Grid -->
         <main class="container mx-auto px-6 pb-12">
             <h2 class="text-3xl font-bold mb-8">Latest Stories</h2>
 
@@ -314,7 +361,6 @@ def home():
                 {% endfor %}
             </div>
 
-            <!-- Pagination (Load more) -->
             <div class="flex justify-center gap-4 mt-10">
                 {% if page > 1 %}
                   <a class="px-6 py-3 rounded-xl bg-gray-800 hover:bg-gray-700 transition"
@@ -325,7 +371,9 @@ def home():
             </div>
 
             {% else %}
-            <p class="text-center text-gray-400">No stories found. Try another search.</p>
+            <p class="text-center text-gray-400">
+              No stories found (or DB timed out briefly). Refresh in a few seconds.
+            </p>
             {% endif %}
         </main>
 
@@ -334,13 +382,10 @@ def home():
         </footer>
 
         <script>
-        // Convert all ISO timestamps rendered by server (UTC) into viewer's local time.
-        // This is the ONLY correct way to show "each user's local time".
         function formatLocal(iso) {
           try {
             const d = new Date(iso);
             if (isNaN(d.getTime())) return null;
-            // e.g. "2026-02-13 10:14 PM"
             const datePart = d.toLocaleDateString(undefined, { year:'numeric', month:'2-digit', day:'2-digit' });
             const timePart = d.toLocaleTimeString(undefined, { hour:'2-digit', minute:'2-digit' });
             return datePart + " " + timePart;
@@ -356,7 +401,6 @@ def home():
     </body>
     </html>
     """
-
     return render_template_string(
         html,
         stories=stories,
@@ -371,8 +415,7 @@ def home():
 
 @app.route("/topic/<topic>")
 def topic_page(topic):
-    page = int(request.args.get("page", "1") or "1")
-    page = max(page, 1)
+    page = max(int(request.args.get("page", "1") or "1"), 1)
 
     topics = get_all_topics()
     last_updated_iso = get_latest_update_iso()
@@ -472,7 +515,6 @@ def topic_page(topic):
                 {% endfor %}
             </div>
 
-            <!-- Pagination -->
             <div class="flex justify-center gap-4 mt-10">
                 {% if page > 1 %}
                   <a class="px-6 py-3 rounded-xl bg-gray-800 hover:bg-gray-700 transition"
@@ -483,7 +525,9 @@ def topic_page(topic):
             </div>
 
             {% else %}
-              <p class="text-center text-gray-400">No stories found.</p>
+              <p class="text-center text-gray-400">
+                No stories found (or DB timed out briefly). Refresh in a few seconds.
+              </p>
             {% endif %}
         </main>
 
@@ -511,7 +555,6 @@ def topic_page(topic):
     </body>
     </html>
     """
-
     return render_template_string(
         html,
         stories=stories,
