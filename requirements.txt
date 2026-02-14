@@ -1,13 +1,18 @@
-﻿gunicorn
 flask
-feedparser
 gunicorn
+feedparser
 psycopg[binary]
+
 xai-sdk
+
 requests
 beautifulsoup4
+lxml
+lxml-html-clean
+readability-lxml
+
 newspaper3k
-lxml_html_clean
+
 
 
 
