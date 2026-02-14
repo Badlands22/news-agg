@@ -166,8 +166,9 @@ def home():
                             <span class="bg-blue-900 text-blue-300 px-4 py-1 rounded-full text-xs font-medium">
                                 {{ story['topic'] | capitalize }}
                             </span>
+                            <!-- UPDATED: date + time (UTC) -->
                             <span class="text-gray-500 text-sm">
-                                {{ story['added_at'].strftime('%Y-%m-%d') if story['added_at'] else '' }}
+                                {{ story['added_at'].astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M UTC') if story['added_at'] else '' }}
                             </span>
                         </div>
                         <a href="{{ story['link'] }}" target="_blank"
@@ -257,8 +258,9 @@ def topic_page(topic):
                             <span class="bg-blue-900 text-blue-300 px-4 py-1 rounded-full text-xs font-medium">
                                 {{ story['topic'] | capitalize }}
                             </span>
+                            <!-- UPDATED: date + time (UTC) -->
                             <span class="text-gray-500 text-sm">
-                                {{ story['added_at'].strftime('%Y-%m-%d') if story['added_at'] else '' }}
+                                {{ story['added_at'].astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M UTC') if story['added_at'] else '' }}
                             </span>
                         </div>
                         <a href="{{ story['link'] }}" target="_blank"
