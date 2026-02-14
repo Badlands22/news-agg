@@ -6,24 +6,20 @@ import sqlite3
 from datetime import datetime, timezone
 
 import feedparser
-import requests
-from bs4 import BeautifulSoup
-
-# Optional: newspaper3k for better article extraction
-try:
-    from newspaper import Article
-except Exception:
-    Article = None
 
 # ---------------- Postgres (Render) ----------------
-# NOTE: requirements.txt must include: psycopg[binary]
+# requirements: psycopg[binary]
 try:
     import psycopg
 except Exception:
     psycopg = None
 
+DATABASE_URL = os.getenv("DATABASE_URL")  # set on Render for Postgres
+DB_PATH = "news.db"  # used only when DATABASE_URL is not set
+POLL_SECONDS = int(os.getenv("POLL_SECONDS", "30"))
+
 # ---------------- xAI (Grok) summaries ----------------
-# NOTE: requirements.txt must include: xai-sdk
+# requirements: xai-sdk
 try:
     from xai_sdk import Client
     from xai_sdk.chat import user, system
@@ -32,21 +28,10 @@ except Exception:
     user = None
     system = None
 
-# ---------------- CONFIG ----------------
-POLL_SECONDS = int(os.getenv("POLL_SECONDS", "30"))
-
-DB_PATH = "news.db"  # used only when DATABASE_URL is not set
-DATABASE_URL = os.getenv("DATABASE_URL")  # set on Render for Postgres
-
 XAI_API_KEY = os.getenv("XAI_API_KEY")
-# Pick whatever you actually have enabled in your xAI console.
-# The docs show grok-4-1-fast-reasoning as an example. :contentReference[oaicite:1]{index=1}
-XAI_MODEL = os.getenv("XAI_MODEL", "grok-4-1-fast-reasoning")
+XAI_MODEL = os.getenv("XAI_MODEL", "grok-4")
 _xai_client = None
 
-FETCH_FULL_ARTICLE = os.getenv("FETCH_FULL_ARTICLE", "1") == "1"
-MAX_ARTICLE_CHARS = int(os.getenv("MAX_ARTICLE_CHARS", "7000"))
-HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "12"))
 
 FEEDS = [
     {"name": "BBC", "url": "http://feeds.bbci.co.uk/news/rss.xml"},
@@ -71,16 +56,10 @@ TOPICS = [
     "netanyahu", "erdogan", "lavrov", "iran", "board of peace", "congo", "sahel"
 ]
 
-# Turn on xAI summaries only for these topics (easy to adjust)
 AI_SUMMARY_TOPICS = [
-    "election", "trump", "russia", "china", "israel", "iran", "bitcoin", "nuclear"
+    "election", "trump", "russia", "china", "israel", "iran", "bitcoin", "ai", "nuclear"
 ]
 
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/122.0.0.0 Safari/537.36"
-)
 
 # ---------------- DATABASE HELPERS ----------------
 def using_postgres() -> bool:
@@ -90,6 +69,7 @@ def using_postgres() -> bool:
 def pg_connect():
     if psycopg is None:
         raise RuntimeError("psycopg is not installed. Add psycopg[binary] to requirements.txt")
+    # psycopg3: autocommit False by default, we commit explicitly
     return psycopg.connect(DATABASE_URL)
 
 
@@ -98,6 +78,10 @@ def sqlite_connect():
 
 
 def init_db():
+    """
+    Ensures schema exists + fingerprint support.
+    IMPORTANT: ON CONFLICT DO NOTHING will handle duplicate link or duplicate fingerprint safely.
+    """
     if using_postgres():
         with pg_connect() as conn:
             with conn.cursor() as c:
@@ -110,26 +94,15 @@ def init_db():
                         pub_date TEXT,
                         topic TEXT,
                         summary TEXT,
-                        added_at TIMESTAMPTZ,
-                        fingerprint TEXT
+                        added_at TIMESTAMPTZ
                     );
                 """)
-                # Ensure column exists if table already existed
+                # fingerprint column + unique index for cross-feed dedupe
                 c.execute("ALTER TABLE public.articles ADD COLUMN IF NOT EXISTS fingerprint TEXT;")
+                c.execute("CREATE UNIQUE INDEX IF NOT EXISTS articles_fingerprint_uniq ON public.articles(fingerprint);")
+                c.execute("CREATE INDEX IF NOT EXISTS articles_added_at_idx ON public.articles (added_at DESC);")
+                c.execute("CREATE INDEX IF NOT EXISTS articles_topic_added_at_idx ON public.articles (topic, added_at DESC);")
             conn.commit()
-
-        # Try to add unique index. If duplicates exist, this will error — that’s fine.
-        try:
-            with pg_connect() as conn:
-                with conn.cursor() as c:
-                    c.execute("""
-                        CREATE UNIQUE INDEX IF NOT EXISTS articles_fingerprint_uniq
-                        ON public.articles(fingerprint);
-                    """)
-                conn.commit()
-        except Exception as e:
-            print(f"NOTE: could not create unique index on fingerprint yet (likely duplicates still exist): {e}")
-
     else:
         conn = sqlite_connect()
         c = conn.cursor()
@@ -144,110 +117,31 @@ def init_db():
                 summary TEXT,
                 added_at TEXT,
                 fingerprint TEXT
-            )
+            );
         """)
-        conn.commit()
-        try:
-            c.execute("CREATE UNIQUE INDEX IF NOT EXISTS articles_fingerprint_uniq ON articles(fingerprint)")
-            conn.commit()
-        except Exception:
-            pass
-        conn.close()
-
-
-def article_exists_by_fingerprint(fingerprint: str) -> bool:
-    if using_postgres():
-        with pg_connect() as conn:
-            with conn.cursor() as c:
-                c.execute("SELECT 1 FROM public.articles WHERE fingerprint = %s LIMIT 1;", (fingerprint,))
-                return c.fetchone() is not None
-    else:
-        conn = sqlite_connect()
-        c = conn.cursor()
-        c.execute("SELECT 1 FROM articles WHERE fingerprint = ?", (fingerprint,))
-        exists = c.fetchone() is not None
-        conn.close()
-        return exists
-
-
-def save_article(title, link, desc, pub_date, topic, summary, fingerprint):
-    if using_postgres():
-        added_at = datetime.now(timezone.utc)
-        with pg_connect() as conn:
-            with conn.cursor() as c:
-                # De-dupe by fingerprint. If we see the same story again via a different URL,
-                # we update link/desc/pub_date and fill summary if missing.
-                c.execute("""
-                    INSERT INTO public.articles (title, link, description, pub_date, topic, summary, added_at, fingerprint)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (fingerprint) DO UPDATE
-                    SET
-                        link = EXCLUDED.link,
-                        description = CASE
-                            WHEN public.articles.description IS NULL OR length(public.articles.description) < 30
-                            THEN EXCLUDED.description
-                            ELSE public.articles.description
-                        END,
-                        pub_date = COALESCE(public.articles.pub_date, EXCLUDED.pub_date),
-                        summary = COALESCE(public.articles.summary, EXCLUDED.summary),
-                        added_at = GREATEST(public.articles.added_at, EXCLUDED.added_at);
-                """, (title, link, desc, pub_date, topic, summary, added_at, fingerprint))
-            conn.commit()
-    else:
-        conn = sqlite_connect()
-        c = conn.cursor()
-        added_at = datetime.now(timezone.utc).isoformat()
-
-        # SQLite UPSERT if fingerprint is unique-indexed; otherwise OR IGNORE covers link.
-        try:
-            c.execute("""
-                INSERT INTO articles (title, link, description, pub_date, topic, summary, added_at, fingerprint)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(fingerprint) DO UPDATE SET
-                    link=excluded.link,
-                    description=CASE
-                        WHEN articles.description IS NULL OR length(articles.description) < 30
-                        THEN excluded.description
-                        ELSE articles.description
-                    END,
-                    pub_date=COALESCE(articles.pub_date, excluded.pub_date),
-                    summary=COALESCE(articles.summary, excluded.summary),
-                    added_at=CASE
-                        WHEN articles.added_at > excluded.added_at THEN articles.added_at
-                        ELSE excluded.added_at
-                    END;
-            """, (title, link, desc, pub_date, topic, summary, added_at, fingerprint))
-        except Exception:
-            c.execute("""
-                INSERT OR IGNORE INTO articles
-                (title, link, description, pub_date, topic, summary, added_at, fingerprint)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (title, link, desc, pub_date, topic, summary, added_at, fingerprint))
-
+        # unique index on fingerprint
+        c.execute("CREATE UNIQUE INDEX IF NOT EXISTS articles_fingerprint_uniq ON articles(fingerprint);")
+        c.execute("CREATE INDEX IF NOT EXISTS articles_added_at_idx ON articles(added_at);")
+        c.execute("CREATE INDEX IF NOT EXISTS articles_topic_added_at_idx ON articles(topic, added_at);")
         conn.commit()
         conn.close()
 
 
-# Create tables on startup
-init_db()
-
-# ---------------- TEXT HELPERS ----------------
 def clean_text(text: str) -> str:
     if not text:
         return ""
-    # strip html tags quickly
-    text = re.sub(r"<[^>]+>", " ", text)
-    # unescape common entities-ish
+    # strip HTML tags
+    text = re.sub(r"<[^>]+>", "", text)
+    # decode a few common entities
     text = (
         text.replace("&nbsp;", " ")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", '"')
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", '"')
     )
-    # remove zero-widths and NBSP variants
+    # remove zero-width and nonbreaking spaces
     text = re.sub(r"[\xa0\u200b\u200c\u200d]", " ", text)
-
     # collapse whitespace
     text = re.sub(r"\s+", " ", text).strip()
     return text
@@ -255,83 +149,77 @@ def clean_text(text: str) -> str:
 
 def normalize_for_fingerprint(title: str) -> str:
     t = clean_text(title).lower()
-    # normalize apostrophes/dashes
-    t = t.replace("’", "'").replace("–", "-").replace("—", "-")
-    # remove punctuation except spaces
-    t = re.sub(r"[^\w\s]", "", t)
-    # collapse whitespace
+    # remove punctuation-ish
+    t = re.sub(r"[^\w\s]", " ", t)
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
 
 def make_fingerprint(title: str, topic: str) -> str:
     base = f"{normalize_for_fingerprint(title)}|{(topic or '').strip().lower()}"
-    return hashlib.md5(base.encode("utf-8")).hexdigest()
+    return hashlib.md5(base.encode("utf-8", errors="ignore")).hexdigest()
 
 
-def short_fallback_summary(title: str, desc: str, topic: str) -> str:
-    # A MUCH better fallback than "matched topic/why it matters tracked topics"
-    title_clean = clean_text(title)
-    desc_clean = clean_text(desc or "")
-
-    parts = []
-    if desc_clean:
-        parts.append(desc_clean[:280].rstrip())
-    else:
-        parts.append("Details are limited in the RSS snippet for this item.")
-
-    parts.append(f"Topic: {topic}")
-    parts.append("Open the link for full context/source details.")
-    return "\n".join(parts)
-
-
-# ---------------- ARTICLE FETCH ----------------
-def fetch_article_text(url: str) -> str:
+def insert_stub(title: str, link: str, desc: str, pub_date: str, topic: str, fingerprint: str):
     """
-    Try newspaper3k first (best), then fallback to requests+bs4.
-    Returns "" on failure.
+    Insert row with summary=NULL first.
+    Returns inserted id if inserted, else None if it already existed (by link or fingerprint).
     """
-    if not url or not FETCH_FULL_ARTICLE:
-        return ""
+    added_at = datetime.now(timezone.utc)
 
-    # 1) newspaper3k
-    if Article is not None:
-        try:
-            a = Article(url, language="en")
-            a.download()
-            a.parse()
-            txt = clean_text(a.text or "")
-            if len(txt) >= 400:
-                return txt[:MAX_ARTICLE_CHARS]
-        except Exception:
-            pass
+    if using_postgres():
+        with pg_connect() as conn:
+            with conn.cursor() as c:
+                c.execute("""
+                    INSERT INTO public.articles (title, link, description, pub_date, topic, summary, added_at, fingerprint)
+                    VALUES (%s, %s, %s, %s, %s, NULL, %s, %s)
+                    ON CONFLICT DO NOTHING
+                    RETURNING id;
+                """, (title, link, desc, pub_date, topic, added_at, fingerprint))
+                row = c.fetchone()
+            conn.commit()
+        return row[0] if row else None
 
-    # 2) requests + bs4 fallback
-    try:
-        r = requests.get(url, timeout=HTTP_TIMEOUT, headers={"User-Agent": USER_AGENT})
-        if r.status_code >= 400:
-            return ""
-        soup = BeautifulSoup(r.text, "html.parser")
-        # Remove junk
-        for tag in soup(["script", "style", "noscript", "header", "footer", "nav", "aside"]):
-            tag.decompose()
-        # Grab paragraphs
-        paras = [clean_text(p.get_text(" ", strip=True)) for p in soup.find_all("p")]
-        paras = [p for p in paras if len(p) > 60]
-        txt = clean_text(" ".join(paras))
-        if len(txt) >= 400:
-            return txt[:MAX_ARTICLE_CHARS]
-    except Exception:
-        return ""
+    conn = sqlite_connect()
+    cur = conn.cursor()
+    added_at_str = added_at.isoformat()
 
-    return ""
+    cur.execute("""
+        INSERT OR IGNORE INTO articles (title, link, description, pub_date, topic, summary, added_at, fingerprint)
+        VALUES (?, ?, ?, ?, ?, NULL, ?, ?);
+    """, (title, link, desc, pub_date, topic, added_at_str, fingerprint))
+
+    conn.commit()
+    new_id = cur.lastrowid if cur.rowcount == 1 else None
+    conn.close()
+    return new_id
+
+
+def update_summary(article_id: int, summary: str):
+    if summary is None:
+        return
+    summary = summary.strip()
+    if not summary:
+        return
+
+    if using_postgres():
+        with pg_connect() as conn:
+            with conn.cursor() as c:
+                c.execute("UPDATE public.articles SET summary = %s WHERE id = %s;", (summary, article_id))
+            conn.commit()
+        return
+
+    conn = sqlite_connect()
+    cur = conn.cursor()
+    cur.execute("UPDATE articles SET summary = ? WHERE id = ?;", (summary, article_id))
+    conn.commit()
+    conn.close()
 
 
 # ---------------- xAI SUMMARIZER ----------------
-def xai_summary(title: str, desc: str, full_text: str, feed_name: str, topic: str) -> str | None:
+def xai_summary(title: str, desc: str, feed_name: str, topic: str):
     """
-    Uses xAI SDK to generate a short, high-signal summary.
-    Returns None if not configured, so we can safely fall back.
+    Returns a high-signal formatted summary, or None if xAI is not configured.
     """
     global _xai_client
 
@@ -339,43 +227,38 @@ def xai_summary(title: str, desc: str, full_text: str, feed_name: str, topic: st
         return None
 
     if _xai_client is None:
-        # The xAI docs show this exact SDK usage pattern. :contentReference[oaicite:2]{index=2}
         _xai_client = Client(api_key=XAI_API_KEY, timeout=60)
 
-    # Prefer full_text; fallback to desc.
-    source_block = full_text if (full_text and len(full_text) > 300) else (desc or "")
+    prompt = f"""Summarize this news item for a monitoring dashboard.
 
-    prompt = f"""You are writing a high-signal news brief for a monitoring dashboard.
+Rules:
+- Do NOT restate the headline verbatim.
+- Use the snippet if present; if it’s thin, explicitly say what's unknown.
+- Output EXACTLY this format:
 
-Hard rules:
-- Do NOT restate the headline.
-- Do NOT mention "tracked topics".
-- If the source content is thin/paywalled, say what is unknown.
-- Be concrete: who did what, where, when, and why it matters.
+Summary: <one sentence>
 
-Output format (exact):
-TLDR: <one sentence>
-Key facts:
-- <bullet>
-- <bullet>
-- <bullet>
+Key details:
+- <bullet 1>
+- <bullet 2>
+- <bullet 3>
+
 Why it matters:
 - <bullet>
+
 What to watch:
 - <bullet>
 
-INPUT
+INPUT:
 Source: {feed_name}
 Topic matched: {topic}
-Headline: {title}
-
-Content:
-{source_block}
+Title: {title}
+Snippet: {desc}
 """
 
     try:
         chat = _xai_client.chat.create(model=XAI_MODEL)
-        chat.append(system("You write concise, high-signal news briefs."))
+        chat.append(system("You write concise, high-signal news summaries."))
         chat.append(user(prompt))
         resp = chat.sample()
         text = (resp.content or "").strip()
@@ -385,81 +268,103 @@ Content:
         return None
 
 
+def fallback_summary(title: str, desc: str, topic: str):
+    """
+    Cheap fallback that’s not the old 'Matched topic / why it matters' garbage.
+    This at least uses a cleaned snippet and calls out unknowns.
+    """
+    t = clean_text(title)
+    d = clean_text(desc or "")
+
+    if d and len(d) > 40:
+        # take first sentence-ish chunk
+        first = re.split(r"[.!?]\s+", d)[0].strip()
+        if first and first.lower() not in t.lower():
+            return f"Summary: {first}\n\nKey details:\n- Topic: {topic}\n\nWhy it matters:\n- Worth monitoring under {topic}.\n\nWhat to watch:\n- Open the source for full context."
+    return f"Summary: {t}\n\nKey details:\n- Topic: {topic}\n\nWhy it matters:\n- Worth monitoring under {topic}.\n\nWhat to watch:\n- Open the source for full context."
+
+
 # ---------------- MAIN LOGIC ----------------
-def process_feed(feed_name, url):
+def process_feed(feed_name: str, url: str):
     print(f"Processing feed: {feed_name}")
     feed = feedparser.parse(url)
-    if not getattr(feed, "entries", None):
+
+    entries = getattr(feed, "entries", None) or []
+    if not entries:
         print(f"No entries found in {feed_name}")
         return
 
-    for entry in feed.entries:
-        title = (entry.get("title") or "").strip()
-        link = (entry.get("link") or "").strip()
-        desc = (entry.get("description") or entry.get("summary") or "").strip()
-        pub_date = entry.get("published") or entry.get("updated") or datetime.now(timezone.utc).isoformat()
+    for entry in entries:
+        try:
+            title = (entry.get("title") or "").strip()
+            link = (entry.get("link") or "").strip()
+            desc = (entry.get("description") or entry.get("summary") or "").strip()
+            pub_date = entry.get("published") or entry.get("updated") or datetime.now(timezone.utc).isoformat()
 
-        if not title or not link:
-            continue
+            if not title or not link:
+                continue
 
-        # Match topic from normalized title/desc
-        norm_title = normalize_for_fingerprint(title)
-        norm_desc = normalize_for_fingerprint(desc)
+            norm_title = normalize_for_fingerprint(title)
+            norm_desc = clean_text(desc).lower()
 
-        matched_topic = None
-        for topic in TOPICS:
-            t = topic.lower()
-            if t in norm_title or t in norm_desc:
-                matched_topic = topic
-                break
+            matched_topic = None
+            for topic in TOPICS:
+                t = topic.lower()
+                if t in norm_title or t in norm_desc:
+                    matched_topic = topic
+                    break
 
-        if not matched_topic:
-            continue
+            if not matched_topic:
+                continue
 
-        fingerprint = make_fingerprint(title, matched_topic)
+            fp = make_fingerprint(title, matched_topic)
 
-        # IMPORTANT: bail early if we've already seen this fingerprint.
-        # This prevents repeated summaries + duplicate inserts via different URLs.
-        if article_exists_by_fingerprint(fingerprint):
-            print(f"Already seen (fingerprint): {title}")
-            continue
+            # INSERT STUB FIRST: prevents duplicate crashes AND avoids wasting xAI tokens on duplicates.
+            new_id = insert_stub(
+                title=clean_text(title),
+                link=link,
+                desc=clean_text(desc),
+                pub_date=str(pub_date),
+                topic=matched_topic.lower(),   # store topics normalized
+                fingerprint=fp
+            )
 
-        print(f"NEW [{feed_name}] (topic={matched_topic}): {title}")
+            if not new_id:
+                # duplicate by link or fingerprint -> safe skip
+                print(f"Already seen (dedup): {link}")
+                continue
 
-        summary = None
-        if matched_topic in AI_SUMMARY_TOPICS:
-            full_text = fetch_article_text(link)
-            summary = xai_summary(title, desc, full_text, feed_name, matched_topic)
+            print(f"NEW [{feed_name}] (topic={matched_topic}): {title}")
+
+            summary = None
+            if matched_topic.lower() in [t.lower() for t in AI_SUMMARY_TOPICS]:
+                summary = xai_summary(title, desc, feed_name, matched_topic)
+                if not summary:
+                    summary = fallback_summary(title, desc, matched_topic)
 
             if summary:
-                print("Generated xAI summary.")
+                update_summary(new_id, summary)
+                print("Saved + summarized.")
             else:
-                summary = short_fallback_summary(title, desc, matched_topic)
+                print("Saved (no summary).")
 
-        # Save (UPSERT by fingerprint)
-        save_article(title, link, clean_text(desc), pub_date, matched_topic, summary, fingerprint)
-        print(f"SAVED: {link}")
+        except Exception as e:
+            # Per-entry safety: never let one bad row kill the loop
+            print(f"Entry error: {e}")
 
 
 def main():
+    init_db()
+
     db_mode = "Postgres (DATABASE_URL)" if using_postgres() else f"SQLite ({DB_PATH})"
     print("Collector started.")
     print(f"DB mode: {db_mode}")
-    print(f"Full-article fetch: {FETCH_FULL_ARTICLE} (newspaper3k={'yes' if Article else 'no'})")
+    print(f"Poll: every {POLL_SECONDS}s")
 
-    if using_postgres():
-        safe = re.sub(r"://([^:]+):([^@]+)@", r"://\1:***@", DATABASE_URL or "")
-        print(f"DATABASE_URL seen by collector: {safe}")
-
-    if XAI_API_KEY and Client is not None:
+    if XAI_API_KEY:
         print(f"xAI enabled. Model: {XAI_MODEL}")
     else:
-        print("xAI not enabled (XAI_API_KEY not set OR xai-sdk not installed).")
-
-    print(f"Collector running every {POLL_SECONDS} seconds… (CTRL+C to stop)")
-    print(f"Feeds: {', '.join(f['name'] for f in FEEDS)}")
-    print(f"Topics: {', '.join(TOPICS)}")
-    print(f"AI summaries for: {', '.join(AI_SUMMARY_TOPICS)}")
+        print("xAI not enabled (XAI_API_KEY not set).")
 
     while True:
         try:
@@ -471,8 +376,9 @@ def main():
             print("\nStopped by user.")
             break
         except Exception as e:
+            # Safety net: if something goes wrong at the cycle level
             print(f"Error in main loop: {e}")
-            time.sleep(60)
+            time.sleep(30)
 
 
 if __name__ == "__main__":
