@@ -1,4 +1,5 @@
 import os
+import re
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -31,28 +32,10 @@ CANON_TOPIC = {
     "executive order": "Executive Order",
     "conspiracy theory": "Conspiracy Theory",
     "board of peace": "Board of Peace",
-    "saudi": "Saudi",
-    "iran": "Iran",
-    "israel": "Israel",
-    "trump": "Trump",
-    "putin": "Putin",
-    "russia": "Russia",
-    "china": "China",
-    "court": "Court",
-    "election": "Election",
-    "voter": "Voter",
-    "injunction": "Injunction",
-    "lawsuit": "Lawsuit",
-    "nuclear": "Nuclear",
-    "corruption": "Corruption",
-    "conspiracy": "Conspiracy",
-    "bitcoin": "Bitcoin",
-    "maha": "MAHA",
-    "netanyahu": "Netanyahu",
-    "erdogan": "Erdogan",
-    "lavrov": "Lavrov",
-    "congo": "Congo",
     "sahel": "Sahel",
+    "congo": "Congo",
+    "maha": "MAHA",
+    "dni": "DNI",
 }
 
 
@@ -63,10 +46,31 @@ def normalize_topic_label(topic: str) -> str:
     key = t.lower()
     if key in CANON_TOPIC:
         return CANON_TOPIC[key]
-    # Default: Title Case, but preserve existing all-caps acronyms
     if t.isupper() and len(t) <= 8:
         return t
     return t.title()
+
+
+def normalize_summary_for_display(text: str) -> str:
+    """
+    Bulletproof conversion of any <br> variants (and escaped &lt;br&gt;) into real newlines.
+    This ensures the UI never shows literal '<br>'.
+    """
+    if not text:
+        return ""
+
+    t = str(text)
+
+    # handle escaped <br> forms first
+    t = t.replace("&lt;br&gt;", "\n").replace("&lt;br/&gt;", "\n").replace("&lt;br /&gt;", "\n")
+
+    # handle ANY <br> tag variant: <br>, <br/>, <br />, <br >, any case
+    t = re.sub(r"(?i)<br\s*/?\s*>", "\n", t)
+
+    # normalize line endings
+    t = t.replace("\r\n", "\n").replace("\r", "\n")
+
+    return t.strip()
 
 
 # ---------------- DB helpers ----------------
@@ -76,8 +80,7 @@ def using_postgres() -> bool:
 
 def pg_connect():
     """
-    Fail-fast. Render will restart the service if gunicorn can't boot.
-    statement_timeout is ms.
+    Fail-fast. statement_timeout is ms.
     """
     if psycopg is None:
         raise RuntimeError("psycopg not installed. Add psycopg[binary] to requirements.txt")
@@ -262,7 +265,6 @@ def get_latest_update_iso():
 
 
 def get_all_topics():
-    # Canonical, pretty labels (these are what your buttons show)
     return [
         "Bitcoin",
         "China",
@@ -304,12 +306,14 @@ def serialize_story(s):
         ts = str(ts)
 
     topic_raw = s.get("topic") or ""
+    summary_raw = s.get("summary") or ""
+
     return {
         "title": s.get("title") or "",
         "link": s.get("link") or "",
         "topic": topic_raw,
         "topic_label": normalize_topic_label(topic_raw),
-        "summary": s.get("summary") or "",
+        "summary": normalize_summary_for_display(summary_raw),
         "added_at": ts or "",
     }
 
@@ -352,21 +356,15 @@ BASE_HTML = r"""
   <title>{{ page_title }}</title>
   <style>
     :root{
-      /* darker, smoother base */
       --bg:#0a0f16;
       --panel:#0f1824;
       --panel2:#0c131d;
-      --card:#0d1621;
 
       --text:#e7eef7;
       --muted:#9fb0c5;
 
-      /* higher-contrast pill/button */
-      --pill:#121f2e;
       --pillBorder:rgba(255,255,255,.16);
-      --pillHover:rgba(255,255,255,.10);
 
-      /* red accent */
       --red:#ff2a2a;
       --red2:#d91f1f;
 
@@ -565,25 +563,9 @@ BASE_HTML = r"""
             <h3>{{ story['title'] }}</h3>
 
             {% if story['summary'] %}
-              {# Safely handle stored "<br>" tokens without rendering raw HTML #}
               <div class="summary">
-  {{
-    (story['summary'] or '')
-      | replace('&lt;br /&gt;','\n')
-      | replace('&lt;br/&gt;','\n')
-      | replace('&lt;br&gt;','\n')
-      | replace('<br />','\n')
-      | replace('<br/>','\n')
-      | replace('<br>','\n')
-      | replace('<BR />','\n')
-      | replace('<BR/>','\n')
-      | replace('<BR>','\n')
-      | e
-      | replace('\n','<br>')
-      | safe
-  }}
-</div>
-
+                {{ (story['summary'] or '') | e | replace('\n','<br>') | safe }}
+              </div>
             {% endif %}
 
             <div class="meta">
@@ -621,15 +603,8 @@ BASE_HTML = r"""
     }[c]));
   }
 
-  function normalizeSummary(raw){
-    // raw may contain literal <br> tokens from older summaries
-    let s = raw || '';
-    s = s.replace(/<br\s*\/?>/gi, "\n");
-    return s;
-  }
-
   function storyCard(s){
-    const summaryText = normalizeSummary(s.summary || '');
+    const summaryText = (s.summary || '');
     const summaryHtml = summaryText
       ? `<div class="summary">${escapeHtml(summaryText).replace(/\\n/g,'<br>')}</div>`
       : '';
@@ -675,7 +650,7 @@ BASE_HTML = r"""
         return;
       }
 
-      // APPEND (not replace)
+      // APPEND
       const html = data.stories.map(storyCard).join('');
       list.insertAdjacentHTML('beforeend', html);
 
@@ -749,5 +724,6 @@ def topic_page(topic):
     )
 
 
+# ---------------- Entrypoint ----------------
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
