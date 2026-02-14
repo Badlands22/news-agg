@@ -7,15 +7,40 @@ from psycopg.rows import dict_row
 
 app = Flask(__name__)
 
-# Render provides this in your service Environment variables
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 
 def pg_connect():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL is not set for news-agg.")
-    # dict_row makes rows behave like {"title": "..."} so your template indexing works
     return psycopg.connect(DATABASE_URL, row_factory=dict_row)
+
+
+def fmt_ts(ts):
+    """
+    Returns 'YYYY-MM-DD HH:MM UTC' or ''.
+    Handles None and string timestamps defensively.
+    """
+    if not ts:
+        return ""
+    try:
+        # psycopg usually returns datetime for TIMESTAMPTZ
+        if isinstance(ts, datetime):
+            return ts.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        # if it’s a string for some reason, try parsing
+        dt = datetime.fromisoformat(str(ts))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    except Exception:
+        return str(ts)
+
+
+def attach_display_times(rows):
+    # rows are dict-like from dict_row
+    for r in rows:
+        r["added_at_display"] = fmt_ts(r.get("added_at"))
+    return rows
 
 
 def get_recent_stories(limit=12, search=None):
@@ -40,7 +65,8 @@ def get_recent_stories(limit=12, search=None):
                     ORDER BY added_at DESC
                     LIMIT %s
                 """, (limit,))
-            return c.fetchall()
+            rows = c.fetchall()
+            return attach_display_times(rows)
 
 
 def get_topic_stories(topic, limit=12):
@@ -53,7 +79,8 @@ def get_topic_stories(topic, limit=12):
                 ORDER BY added_at DESC
                 LIMIT %s
             """, (topic, limit))
-            return c.fetchall()
+            rows = c.fetchall()
+            return attach_display_times(rows)
 
 
 def get_all_topics():
@@ -73,10 +100,7 @@ def get_latest_update():
             c.execute("SELECT MAX(added_at) AS max_added_at FROM public.articles;")
             row = c.fetchone()
             ts = row["max_added_at"] if row else None
-            if ts:
-                ts_utc = ts.astimezone(timezone.utc)
-                return ts_utc.strftime("%Y-%m-%d %H:%M UTC")
-            return "Never"
+            return fmt_ts(ts) if ts else "Never"
 
 
 @app.route('/')
@@ -166,10 +190,7 @@ def home():
                             <span class="bg-blue-900 text-blue-300 px-4 py-1 rounded-full text-xs font-medium">
                                 {{ story['topic'] | capitalize }}
                             </span>
-                            <!-- UPDATED: date + time (UTC) -->
-                            <span class="text-gray-500 text-sm">
-                                {{ story['added_at'].astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M UTC') if story['added_at'] else '' }}
-                            </span>
+                            <span class="text-gray-500 text-sm">{{ story['added_at_display'] }}</span>
                         </div>
                         <a href="{{ story['link'] }}" target="_blank"
                            class="mt-6 block text-center bg-red-600 hover:bg-red-500 transition py-3 rounded-xl font-medium">
@@ -191,13 +212,7 @@ def home():
     </html>
     """
     now_year = datetime.now().year
-    return render_template_string(
-        html,
-        stories=stories,
-        topics=topics,
-        last_updated=last_updated,
-        now_year=now_year
-    )
+    return render_template_string(html, stories=stories, topics=topics, last_updated=last_updated, now_year=now_year)
 
 
 @app.route('/topic/<topic>')
@@ -258,10 +273,7 @@ def topic_page(topic):
                             <span class="bg-blue-900 text-blue-300 px-4 py-1 rounded-full text-xs font-medium">
                                 {{ story['topic'] | capitalize }}
                             </span>
-                            <!-- UPDATED: date + time (UTC) -->
-                            <span class="text-gray-500 text-sm">
-                                {{ story['added_at'].astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M UTC') if story['added_at'] else '' }}
-                            </span>
+                            <span class="text-gray-500 text-sm">{{ story['added_at_display'] }}</span>
                         </div>
                         <a href="{{ story['link'] }}" target="_blank"
                            class="mt-6 block text-center bg-red-600 hover:bg-red-500 transition py-3 rounded-xl font-medium">
@@ -280,14 +292,7 @@ def topic_page(topic):
     </html>
     """
     now_year = datetime.now().year
-    return render_template_string(
-        html,
-        stories=stories,
-        topics=topics,
-        topic=topic,
-        last_updated=last_updated,
-        now_year=now_year
-    )
+    return render_template_string(html, stories=stories, topics=topics, topic=topic, last_updated=last_updated, now_year=now_year)
 
 
 if __name__ == '__main__':
