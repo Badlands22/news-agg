@@ -41,7 +41,8 @@ TOPICS = [
     "netanyahu", "erdogan", "lavrov", "iran", "board of peace", "congo", "sahel"
 ]
 
-AI_SUMMARY_TOPICS = []
+# ✅ TURN ON "AI-style" bullet summaries for ALL topics
+AI_SUMMARY_TOPICS = TOPICS
 
 
 # ---------------- DATABASE HELPERS ----------------
@@ -52,7 +53,6 @@ def using_postgres() -> bool:
 def pg_connect():
     if psycopg is None:
         raise RuntimeError("psycopg is not installed. Add psycopg[binary] to requirements.txt")
-    # psycopg can connect using Render's DATABASE_URL directly
     return psycopg.connect(DATABASE_URL)
 
 
@@ -65,7 +65,7 @@ def init_db():
         with pg_connect() as conn:
             with conn.cursor() as c:
                 c.execute("""
-                    CREATE TABLE IF NOT EXISTS articles (
+                    CREATE TABLE IF NOT EXISTS public.articles (
                         id SERIAL PRIMARY KEY,
                         title TEXT,
                         link TEXT UNIQUE,
@@ -97,7 +97,7 @@ def is_new_article(link: str) -> bool:
     if using_postgres():
         with pg_connect() as conn:
             with conn.cursor() as c:
-                c.execute("SELECT 1 FROM articles WHERE link = %s LIMIT 1;", (link,))
+                c.execute("SELECT 1 FROM public.articles WHERE link = %s LIMIT 1;", (link,))
                 return c.fetchone() is None
     else:
         conn = sqlite_connect()
@@ -114,7 +114,7 @@ def save_article(title, link, desc, pub_date, topic, summary):
         with pg_connect() as conn:
             with conn.cursor() as c:
                 c.execute("""
-                    INSERT INTO articles (title, link, description, pub_date, topic, summary, added_at)
+                    INSERT INTO public.articles (title, link, description, pub_date, topic, summary, added_at)
                     VALUES (%s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (link) DO NOTHING;
                 """, (title, link, desc, pub_date, topic, summary, added_at))
@@ -145,9 +145,12 @@ def clean_text(text: str) -> str:
     text = re.sub(r'&lt;', '<', text)
     text = re.sub(r'&gt;', '>', text)
     text = re.sub(r'&quot;', '"', text)
+    # remove weird invisible chars
     text = re.sub(r'[\xa0\u200b\u200c\u200d]', ' ', text)
+
     publishers = r'(?:AOL\.com|The New York Times|CNN\.com|MSN|Oman Observer|매일경제|openPR\.com|Facebook|China Daily|The Motley Fool|The Guardian|The Times of Israel|CTech|igor´sLAB|AOL|Springer Professional|Bitget|Unite\.AI|Vocal\.media|Press of Atlantic City|Stock Traders Daily|The Globe and Mail|Haaretz|abudhabi-news\.com|Insider Monkey|Far Out Magazine|Telegrafi|Reuters)'
     text = re.sub(rf'\s*(?:-|\||–|—)?\s*{publishers}$', '', text, flags=re.IGNORECASE)
+
     text = re.sub(r'\s+', ' ', text).strip()
     text = re.sub(r'(\b\w+\b\s*)\1+', r'\1', text)
     return text
@@ -160,11 +163,13 @@ def normalize_text(text: str) -> str:
     return text
 
 
-def headline_only_summary(title: str, desc: str, topic: str):
-    title_clean = normalize_text(title)
+def headline_only_summary(title: str, desc: str, topic: str) -> str:
+    # ✅ Keep title readable (don’t lowercase/strip punctuation)
+    title_display = clean_text(title)
+    title_norm = normalize_text(title)
     desc_clean = clean_text(desc or "")
 
-    bullets = [f"- {title_clean}"]
+    bullets = [f"- {title_display}"]
 
     if desc_clean and len(desc_clean) > 30:
         sentences = re.split(r'[.!?]+', desc_clean)
@@ -172,7 +177,7 @@ def headline_only_summary(title: str, desc: str, topic: str):
         for sent in sentences:
             sent = sent.strip()
             if len(sent) > 15 and added < 1:
-                similarity = SequenceMatcher(None, sent.lower(), title_clean).ratio()
+                similarity = SequenceMatcher(None, sent.lower(), title_norm).ratio()
                 if similarity < 0.55:
                     bullets.append(f"- {sent}")
                     added += 1
@@ -232,13 +237,12 @@ def main():
     print("TEST: Collector started - this should appear in the log!")
     print(f"DB mode: {db_mode}")
     if using_postgres():
-        # redact password in printed URL
-        safe = re.sub(r"://([^:]+):([^@]+)@", r"://\\1:***@", DATABASE_URL or "")
+        safe = re.sub(r"://([^:]+):([^@]+)@", r"://\1:***@", DATABASE_URL or "")
         print(f"DATABASE_URL seen by collector: {safe}")
     print(f"Collector running every {POLL_SECONDS} seconds… (CTRL+C to stop)")
     print(f"Feeds: {', '.join(f['name'] for f in FEEDS)}")
     print(f"Topics: {', '.join(TOPICS)}")
-    print(f"AI summaries only for: {', '.join(AI_SUMMARY_TOPICS)}")
+    print(f"AI summaries enabled for: {', '.join(AI_SUMMARY_TOPICS)}")
 
     while True:
         try:
