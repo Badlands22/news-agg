@@ -7,6 +7,21 @@ import psycopg
 from psycopg.rows import dict_row
 
 app = Flask(__name__)
+@app.route("/debug")
+def debug():
+    import os
+    try:
+        import psycopg
+        psycopg_ok = True
+    except Exception as e:
+        psycopg_ok = False
+
+    has_db_url = bool(os.getenv("DATABASE_URL"))
+    return {
+        "psycopg_installed": psycopg_ok,
+        "has_DATABASE_URL": has_db_url
+    }
+
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
