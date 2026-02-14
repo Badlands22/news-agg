@@ -4,28 +4,25 @@ import time
 import sqlite3
 import hashlib
 from datetime import datetime, timezone
-from difflib import SequenceMatcher
 
 import feedparser
-
-# ---- optional: better summaries by fetching article page text ----
 import requests
 from bs4 import BeautifulSoup
 
+# Article extraction
+from newspaper import Article
+
 # ---------------- Postgres (Render) ----------------
-# NOTE: requirements.txt must include: psycopg[binary]
 try:
     import psycopg
 except Exception:
     psycopg = None
 
 POLL_SECONDS = 30
-DB_PATH = "news.db"  # used only when DATABASE_URL is not set
-DATABASE_URL = os.getenv("DATABASE_URL")  # set on Render for Postgres
-
+DB_PATH = "news.db"
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 # ---------------- xAI (Grok) summaries ----------------
-# NOTE: requirements.txt must include: xai-sdk
 try:
     from xai_sdk import Client
     from xai_sdk.chat import user, system
@@ -38,6 +35,10 @@ XAI_API_KEY = os.getenv("XAI_API_KEY")
 XAI_MODEL = os.getenv("XAI_MODEL", "grok-4")
 _xai_client = None
 
+# ---- Controls ----
+SUMMARY_MIN_CHARS = 800      # don't call AI unless we have this much article text
+EXTRACT_TIMEOUT = 18         # seconds for article fetch
+REQUEST_TIMEOUT = 15
 
 FEEDS = [
     {"name": "BBC", "url": "http://feeds.bbci.co.uk/news/rss.xml"},
@@ -62,7 +63,6 @@ TOPICS = [
     "netanyahu", "erdogan", "lavrov", "iran", "board of peace", "congo", "sahel"
 ]
 
-# Topics that should get AI summaries (exact strings must match your TOPICS)
 AI_SUMMARY_TOPICS = [
     "election", "trump", "russia", "china", "israel", "iran", "bitcoin", "nuclear"
 ]
@@ -84,9 +84,6 @@ def sqlite_connect():
 
 
 def init_db():
-    """
-    Ensure tables + fingerprint column exist (Postgres or SQLite).
-    """
     if using_postgres():
         with pg_connect() as conn:
             with conn.cursor() as c:
@@ -103,9 +100,7 @@ def init_db():
                         fingerprint TEXT
                     );
                 """)
-                # In case table existed without fingerprint
                 c.execute("ALTER TABLE public.articles ADD COLUMN IF NOT EXISTS fingerprint TEXT;")
-                # Unique index should already exist, but harmless if it does
                 c.execute("""
                     CREATE UNIQUE INDEX IF NOT EXISTS articles_fingerprint_uniq
                     ON public.articles(fingerprint);
@@ -114,7 +109,7 @@ def init_db():
     else:
         conn = sqlite_connect()
         c = conn.cursor()
-        c.execute('''
+        c.execute("""
             CREATE TABLE IF NOT EXISTS articles (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 title TEXT,
@@ -126,17 +121,13 @@ def init_db():
                 added_at TEXT,
                 fingerprint TEXT
             )
-        ''')
-        # SQLite unique index on fingerprint to prevent duplicates
+        """)
         c.execute("CREATE UNIQUE INDEX IF NOT EXISTS articles_fingerprint_uniq ON articles(fingerprint)")
         conn.commit()
         conn.close()
 
 
-def is_new_article_by_fingerprint(fp: str) -> bool:
-    """
-    True if we do NOT already have this fingerprint.
-    """
+def is_new_by_fingerprint(fp: str) -> bool:
     if using_postgres():
         with pg_connect() as conn:
             with conn.cursor() as c:
@@ -156,7 +147,6 @@ def save_article(title, link, desc, pub_date, topic, summary, fingerprint):
         added_at = datetime.now(timezone.utc)
         with pg_connect() as conn:
             with conn.cursor() as c:
-                # Dedupe on fingerprint (NOT link). Link can differ for the same story.
                 c.execute("""
                     INSERT INTO public.articles (title, link, description, pub_date, topic, summary, added_at, fingerprint)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
@@ -167,43 +157,36 @@ def save_article(title, link, desc, pub_date, topic, summary, fingerprint):
         conn = sqlite_connect()
         c = conn.cursor()
         added_at = datetime.now(timezone.utc).isoformat()
-        c.execute('''
+        c.execute("""
             INSERT OR IGNORE INTO articles
             (title, link, description, pub_date, topic, summary, added_at, fingerprint)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (title, link, desc, pub_date, topic, summary, added_at, fingerprint))
+        """, (title, link, desc, pub_date, topic, summary, added_at, fingerprint))
         conn.commit()
         conn.close()
 
 
-# Create tables on startup
 init_db()
 
 
-# ---------------- TEXT + FINGERPRINT HELPERS ----------------
+# ---------------- TEXT HELPERS ----------------
 def clean_text(text: str) -> str:
     if not text:
         return ""
     text = re.sub(r'<[^>]+>', '', text)
-    text = re.sub(r'&nbsp;', ' ', text)
-    text = re.sub(r'&amp;', '&', text)
-    text = re.sub(r'&lt;', '<', text)
-    text = re.sub(r'&gt;', '>', text)
-    text = re.sub(r'&quot;', '"', text)
-    # strip zero-width chars that cause hidden duplicates
-    text = re.sub(r'[\xa0\u200b\u200c\u200d]', ' ', text)
+    text = re.sub(r'[\xa0\u200b\u200c\u200d]', ' ', text)  # strip invisible chars
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
 
+def normalize_for_match(text: str) -> str:
+    text = clean_text(text).lower()
+    text = re.sub(r'[^\w\s]', '', text)
+    return text
+
+
 def normalize_for_fingerprint(text: str) -> str:
-    """
-    Match your SQL approach:
-    md5(lower(regexp_replace(title, '\s+', ' ', 'g')) || '|' || topic)
-    """
-    t = clean_text(text)
-    t = t.lower()
-    # collapse whitespace like regexp_replace(title, '\s+', ' ', 'g')
+    t = clean_text(text).lower()
     t = re.sub(r'\s+', ' ', t).strip()
     return t
 
@@ -213,144 +196,122 @@ def make_fingerprint(title: str, topic: str) -> str:
     return hashlib.md5(base.encode("utf-8")).hexdigest()
 
 
-def normalize_text_for_match(text: str) -> str:
-    text = clean_text(text).lower()
-    text = re.sub(r'[^\w\s]', '', text)
-    return text
-
-
-def headline_only_summary(title: str, desc: str, topic: str) -> str:
+# ---------------- LINK RESOLUTION ----------------
+def resolve_final_url(url: str) -> str:
     """
-    Fallback if xAI isn't available.
-    Tries to use RSS snippet without being useless.
+    Resolve redirects to reach the publisher page.
+    Helps a lot with Google News wrapper links.
     """
-    desc_clean = clean_text(desc or "")
-    lines = []
-
-    # One sentence "what happened" attempt
-    if desc_clean and len(desc_clean) > 40:
-        # take the first sentence-ish chunk
-        first = re.split(r'[.!?]+', desc_clean)[0].strip()
-        if first:
-            lines.append(first)
-    else:
-        lines.append("Summary unavailable from RSS snippet.")
-
-    # 2 bullets: why it matters / watch next (non-generic)
-    lines.append(f"- Why it matters: Track updates related to {topic}.")
-    lines.append("- Watch next: Details may be behind a paywall or require opening the source link.")
-
-    return "\n".join(lines)
+    if not url:
+        return url
+    try:
+        r = requests.get(
+            url,
+            timeout=REQUEST_TIMEOUT,
+            allow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 (NewsAggBot/1.0)"}
+        )
+        # If it redirected, requests will give final URL
+        return r.url or url
+    except Exception:
+        return url
 
 
-# ---------------- Page fetch + extraction (better input for AI) ----------------
-def fetch_article_text(url: str, max_chars: int = 1500) -> str:
+# ---------------- ARTICLE EXTRACTION ----------------
+def extract_article_text(url: str) -> str:
     """
-    Fetch a page and extract meta description + first paragraphs.
-    This makes summaries MUCH better than RSS snippets.
+    Try to pull main article text. Works on many sites.
+    Will be weak on hard paywalls.
     """
     if not url:
         return ""
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; NewsAggBot/1.0; +https://example.com)"
-    }
-
     try:
-        r = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
-        if r.status_code >= 400:
-            return ""
-        html = r.text
+        a = Article(url, language="en")
+        a.download()
+        a.parse()
+        txt = clean_text(a.text)
+        return txt
     except Exception:
         return ""
 
-    try:
-        soup = BeautifulSoup(html, "html.parser")
 
-        # Remove junk
+def extract_fallback_snippet(url: str) -> str:
+    """
+    If newspaper fails, try meta description + first paragraphs.
+    """
+    try:
+        r = requests.get(url, timeout=REQUEST_TIMEOUT, headers={"User-Agent": "Mozilla/5.0 (NewsAggBot/1.0)"})
+        if r.status_code >= 400:
+            return ""
+        soup = BeautifulSoup(r.text, "html.parser")
         for tag in soup(["script", "style", "noscript"]):
             tag.decompose()
 
         parts = []
-
-        # meta description
         md = soup.find("meta", attrs={"name": "description"})
         if md and md.get("content"):
             parts.append(md["content"].strip())
-
         og = soup.find("meta", attrs={"property": "og:description"})
         if og and og.get("content"):
             parts.append(og["content"].strip())
 
-        # first few paragraphs
         paras = soup.find_all("p")
         collected = []
         for p in paras[:8]:
-            txt = clean_text(p.get_text(" ", strip=True))
-            if len(txt) >= 60:
-                collected.append(txt)
-            if sum(len(x) for x in collected) > max_chars:
-                break
-
+            t = clean_text(p.get_text(" ", strip=True))
+            if len(t) >= 60:
+                collected.append(t)
         if collected:
             parts.append(" ".join(collected))
 
-        text = clean_text(" ".join(parts))
-        return text[:max_chars]
+        return clean_text(" ".join(parts))
     except Exception:
         return ""
 
 
 # ---------------- xAI SUMMARIZER ----------------
-def xai_summary(title: str, desc: str, feed_name: str, topic: str, resolved_text: str):
-    """
-    Uses xAI (Grok) to generate a short, actually-useful monitoring summary.
-    If we don't have enough text, we return None and fall back.
-    """
+def xai_summarize(title: str, topic: str, source: str, article_text: str) -> str | None:
     global _xai_client
 
     if not XAI_API_KEY or Client is None:
         return None
 
-    # Don’t ask the model to hallucinate from nothing.
-    usable = clean_text(resolved_text or desc or "")
-    if len(usable) < 120:
+    if not article_text or len(article_text) < SUMMARY_MIN_CHARS:
         return None
 
     if _xai_client is None:
         _xai_client = Client(api_key=XAI_API_KEY, timeout=60)
 
-    prompt = f"""You are writing a HIGH-SIGNAL news brief for a monitoring dashboard.
+    prompt = f"""You are writing a high-signal news brief for a monitoring dashboard.
 
-Write:
-- 1 sentence: what happened (do NOT repeat the headline)
-- 3 bullets:
-  • Key details (names/places/figures if present)
-  • Why it matters (real-world impact, not generic)
-  • What to watch next (the next thing that could happen)
+Do NOT restate the headline.
+Use ONLY the provided article text. If details are missing, say "unclear".
 
-Rules:
-- If the source text is thin/unclear, say what's unknown instead of guessing.
-- Keep it short and sharp.
+Output EXACTLY:
+1) One sentence: what happened (who/what/where)
+2) Three bullets:
+- Key details: (names/places/numbers)
+- Why it matters: (real impact)
+- What to watch next: (next likely development)
 
-INPUT:
-Source: {feed_name}
 Topic matched: {topic}
+Source feed: {source}
 Headline: {title}
 
-Context text:
-{usable}
+Article text:
+{article_text}
 """
 
     try:
         chat = _xai_client.chat.create(model=XAI_MODEL)
-        chat.append(system("You write concise, accurate, high-signal news summaries."))
+        chat.append(system("You are concise and factual. No fluff. No generic 'why it matters'."))
         chat.append(user(prompt))
         resp = chat.sample()
-        text = (resp.content or "").strip()
-        return text if text else None
+        out = (resp.content or "").strip()
+        return out if out else None
     except Exception as e:
-        print(f"xAI summary error: {e}")
+        print(f"xAI error: {e}")
         return None
 
 
@@ -358,24 +319,23 @@ Context text:
 def process_feed(feed_name, url):
     print(f"Processing feed: {feed_name}")
     feed = feedparser.parse(url)
-    if not hasattr(feed, 'entries') or not feed.entries:
+    if not hasattr(feed, "entries") or not feed.entries:
         print(f"No entries found in {feed_name}")
         return
 
     for entry in feed.entries:
-        title = clean_text(entry.get('title', '')).strip()
-        link = clean_text(entry.get('link', '')).strip()
-        desc = clean_text(entry.get('description', entry.get('summary', ''))).strip()
-        pub_date = entry.get('published', entry.get('updated', datetime.now(timezone.utc).isoformat()))
+        title = clean_text(entry.get("title", "")).strip()
+        link = clean_text(entry.get("link", "")).strip()
+        desc = clean_text(entry.get("description", entry.get("summary", ""))).strip()
+        pub_date = entry.get("published", entry.get("updated", datetime.now(timezone.utc).isoformat()))
 
         if not title or not link:
             continue
 
-        # Topic match
-        matched_topic = None
-        norm_title = normalize_text_for_match(title)
-        norm_desc = normalize_text_for_match(desc)
+        norm_title = normalize_for_match(title)
+        norm_desc = normalize_for_match(desc)
 
+        matched_topic = None
         for topic in TOPICS:
             t = topic.lower()
             if t in norm_title or t in norm_desc:
@@ -385,32 +345,44 @@ def process_feed(feed_name, url):
         if not matched_topic:
             continue
 
-        # Fingerprint (dedupe key)
         fp = make_fingerprint(title, matched_topic)
 
-        # If we've already got it, skip BEFORE doing expensive summary fetch/AI.
-        if not is_new_article_by_fingerprint(fp):
-            # print(f"Duplicate fingerprint (skipping): {title}")
+        # Skip duplicates BEFORE doing any network-heavy work
+        if not is_new_by_fingerprint(fp):
             continue
 
-        print(f"NEW (topic) [{feed_name}]: {title}")
+        # Resolve the final publisher URL (helps Google News)
+        final_url = resolve_final_url(link)
 
-        # Better source text: try fetching the page if RSS snippet is weak
-        page_text = ""
-        if len(desc) < 200:
-            page_text = fetch_article_text(link)
+        # Extract article text
+        article_text = extract_article_text(final_url)
+        if len(article_text) < 400:
+            # fallback extraction if newspaper3k failed
+            article_text = extract_fallback_snippet(final_url)
 
         summary = None
         if matched_topic in AI_SUMMARY_TOPICS:
-            summary = xai_summary(title, desc, feed_name, matched_topic, page_text)
-            if summary:
-                print("Generated xAI summary.")
-            else:
-                summary = headline_only_summary(title, desc, matched_topic)
+            summary = xai_summarize(title, matched_topic, feed_name, article_text)
 
-        # Save (Postgres: ON CONFLICT fingerprint DO NOTHING)
-        save_article(title, link, desc, pub_date, matched_topic, summary, fp)
-        print("SAVED.")
+        # If xAI couldn't run (paywall / thin text), store a better fallback than “headline only”
+        if matched_topic in AI_SUMMARY_TOPICS and not summary:
+            if article_text and len(article_text) > 120:
+                summary = " ".join(article_text.split()[:60]).strip() + "…"
+                summary += "\n- Why it matters: Open the link for full details (source may be paywalled or limited)."
+                summary += "\n- What to watch next: Updates from other outlets covering the same event."
+            else:
+                summary = None  # leave empty rather than junk
+
+        save_article(
+            title=title,
+            link=final_url,          # store final URL instead of wrapper
+            desc=desc,
+            pub_date=pub_date,
+            topic=matched_topic,
+            summary=summary,
+            fingerprint=fp
+        )
+        print(f"SAVED: {title}")
 
 
 def main():
@@ -425,21 +397,19 @@ def main():
     if XAI_API_KEY:
         print(f"xAI enabled. Model: {XAI_MODEL}")
     else:
-        print("xAI not enabled (XAI_API_KEY not set). Summaries will use fallback text.")
+        print("xAI not enabled (XAI_API_KEY not set).")
 
     print(f"Collector running every {POLL_SECONDS} seconds…")
-    print(f"Feeds: {', '.join(f['name'] for f in FEEDS)}")
-    print(f"Topics: {', '.join(TOPICS)}")
     print(f"AI summaries for: {', '.join(AI_SUMMARY_TOPICS)}")
 
     while True:
         try:
-            for feed in FEEDS:
-                process_feed(feed["name"], feed["url"])
+            for f in FEEDS:
+                process_feed(f["name"], f["url"])
             print(f"Cycle complete. Sleeping {POLL_SECONDS}s...")
             time.sleep(POLL_SECONDS)
         except KeyboardInterrupt:
-            print("\nStopped by user.")
+            print("\nStopped.")
             break
         except Exception as e:
             print(f"Error in main loop: {e}")
