@@ -1,13 +1,22 @@
-﻿import feedparser
+import os
+import feedparser
 import re
 import time
 import sqlite3
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 
+# Postgres driver (Render)
+# NOTE: you must add psycopg[binary] to requirements.txt
+try:
+    import psycopg
+except Exception:
+    psycopg = None
+
 # ---------------- CONFIG ----------------
 POLL_SECONDS = 30
-DB_PATH = "news.db"
+DB_PATH = "news.db"  # used only when DATABASE_URL is not set
+DATABASE_URL = os.getenv("DATABASE_URL")  # set on Render for Postgres
 
 FEEDS = [
     {"name": "BBC", "url": "http://feeds.bbci.co.uk/news/rss.xml"},
@@ -34,25 +43,99 @@ TOPICS = [
 
 AI_SUMMARY_TOPICS = []
 
-# ---------------- DATABASE SETUP ----------------
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS articles
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  title TEXT,
-                  link TEXT UNIQUE,
-                  description TEXT,
-                  pub_date TEXT,
-                  topic TEXT,
-                  summary TEXT,
-                  added_at TEXT)''')
-    conn.commit()
-    conn.close()
 
+# ---------------- DATABASE HELPERS ----------------
+def using_postgres() -> bool:
+    return bool(DATABASE_URL)
+
+
+def pg_connect():
+    if psycopg is None:
+        raise RuntimeError("psycopg is not installed. Add psycopg[binary] to requirements.txt")
+    # psycopg can connect using Render's DATABASE_URL directly
+    return psycopg.connect(DATABASE_URL)
+
+
+def sqlite_connect():
+    return sqlite3.connect(DB_PATH)
+
+
+def init_db():
+    if using_postgres():
+        with pg_connect() as conn:
+            with conn.cursor() as c:
+                c.execute("""
+                    CREATE TABLE IF NOT EXISTS articles (
+                        id SERIAL PRIMARY KEY,
+                        title TEXT,
+                        link TEXT UNIQUE,
+                        description TEXT,
+                        pub_date TEXT,
+                        topic TEXT,
+                        summary TEXT,
+                        added_at TIMESTAMPTZ
+                    );
+                """)
+            conn.commit()
+    else:
+        conn = sqlite_connect()
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS articles
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      title TEXT,
+                      link TEXT UNIQUE,
+                      description TEXT,
+                      pub_date TEXT,
+                      topic TEXT,
+                      summary TEXT,
+                      added_at TEXT)''')
+        conn.commit()
+        conn.close()
+
+
+def is_new_article(link: str) -> bool:
+    if using_postgres():
+        with pg_connect() as conn:
+            with conn.cursor() as c:
+                c.execute("SELECT 1 FROM articles WHERE link = %s LIMIT 1;", (link,))
+                return c.fetchone() is None
+    else:
+        conn = sqlite_connect()
+        c = conn.cursor()
+        c.execute("SELECT 1 FROM articles WHERE link = ?", (link,))
+        exists = c.fetchone() is not None
+        conn.close()
+        return not exists
+
+
+def save_article(title, link, desc, pub_date, topic, summary):
+    if using_postgres():
+        added_at = datetime.now(timezone.utc)
+        with pg_connect() as conn:
+            with conn.cursor() as c:
+                c.execute("""
+                    INSERT INTO articles (title, link, description, pub_date, topic, summary, added_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (link) DO NOTHING;
+                """, (title, link, desc, pub_date, topic, summary, added_at))
+            conn.commit()
+    else:
+        conn = sqlite_connect()
+        c = conn.cursor()
+        added_at = datetime.now(timezone.utc).isoformat()
+        c.execute('''INSERT OR IGNORE INTO articles
+                     (title, link, description, pub_date, topic, summary, added_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                  (title, link, desc, pub_date, topic, summary, added_at))
+        conn.commit()
+        conn.close()
+
+
+# Create tables on startup
 init_db()
 
-# ---------------- HELPERS ----------------
+
+# ---------------- TEXT HELPERS ----------------
 def clean_text(text: str) -> str:
     if not text:
         return ""
@@ -69,11 +152,13 @@ def clean_text(text: str) -> str:
     text = re.sub(r'(\b\w+\b\s*)\1+', r'\1', text)
     return text
 
+
 def normalize_text(text: str) -> str:
     text = clean_text(text)
     text = text.lower()
     text = re.sub(r'[^\w\s]', '', text)
     return text
+
 
 def headline_only_summary(title: str, desc: str, topic: str):
     title_clean = normalize_text(title)
@@ -97,24 +182,6 @@ def headline_only_summary(title: str, desc: str, topic: str):
 
     return "\n".join(bullets)
 
-def is_new_article(link: str) -> bool:
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT 1 FROM articles WHERE link = ?", (link,))
-    exists = c.fetchone() is not None
-    conn.close()
-    return not exists
-
-def save_article(title, link, desc, pub_date, topic, summary):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    added_at = datetime.now(timezone.utc).isoformat()
-    c.execute('''INSERT OR IGNORE INTO articles
-                 (title, link, description, pub_date, topic, summary, added_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)''',
-              (title, link, desc, pub_date, topic, summary, added_at))
-    conn.commit()
-    conn.close()
 
 # ---------------- MAIN LOGIC ----------------
 def process_feed(feed_name, url):
@@ -159,8 +226,15 @@ def process_feed(feed_name, url):
         else:
             print(f"Already seen: {link}")
 
+
 def main():
+    db_mode = "Postgres (DATABASE_URL)" if using_postgres() else f"SQLite ({DB_PATH})"
     print("TEST: Collector started - this should appear in the log!")
+    print(f"DB mode: {db_mode}")
+    if using_postgres():
+        # redact password in printed URL
+        safe = re.sub(r"://([^:]+):([^@]+)@", r"://\\1:***@", DATABASE_URL or "")
+        print(f"DATABASE_URL seen by collector: {safe}")
     print(f"Collector running every {POLL_SECONDS} seconds… (CTRL+C to stop)")
     print(f"Feeds: {', '.join(f['name'] for f in FEEDS)}")
     print(f"Topics: {', '.join(TOPICS)}")
@@ -178,6 +252,7 @@ def main():
         except Exception as e:
             print(f"Error in main loop: {e}")
             time.sleep(60)
+
 
 if __name__ == "__main__":
     main()
