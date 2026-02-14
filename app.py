@@ -1,9 +1,12 @@
+# From your repo root (or adjust path):
+$path = "app.py"
+
+$txt = @'
 import os
 import sqlite3
 import time
 from datetime import datetime, timezone
-
-from flask import Flask, render_template_string, request
+from flask import Flask, render_template_string, request, jsonify, url_for
 
 # Postgres (Render)
 try:
@@ -15,27 +18,23 @@ app = Flask(__name__)
 
 DB_PATH = os.getenv("DB_PATH", "news.db")
 DATABASE_URL = os.getenv("DATABASE_URL")
-
 PAGE_SIZE_DEFAULT = 12
 
 # Small in-process cache to prevent hammering DB during deploy/health checks
 CACHE_TTL_SECONDS = 10
 _cache = {}  # key -> (expires_epoch, value)
 
-
 # ---------------- DB helpers ----------------
 def using_postgres() -> bool:
     return bool(DATABASE_URL)
 
-
 def pg_connect():
     """
-    Important: fail fast. Render will kill the service if requests hang.
-    statement_timeout is in ms.
+    Important: fail fast.
+    Render will kill the service if requests hang. statement_timeout is in ms.
     """
     if psycopg is None:
         raise RuntimeError("psycopg is not installed. Add psycopg[binary] to requirements.txt")
-
     # statement_timeout=5000 => any query taking >5s aborts instead of hanging forever
     return psycopg.connect(
         DATABASE_URL,
@@ -44,10 +43,8 @@ def pg_connect():
         application_name="news_agg",
     )
 
-
 def sqlite_connect():
     return sqlite3.connect(DB_PATH)
-
 
 def _cache_get(key):
     item = _cache.get(key)
@@ -59,16 +56,11 @@ def _cache_get(key):
         return None
     return val
 
-
 def _cache_set(key, val, ttl=CACHE_TTL_SECONDS):
     _cache[key] = (time.time() + ttl, val)
 
-
 def fetch_rows(query: str, params: tuple = ()):
-    """
-    Return list[dict] rows for both Postgres and SQLite.
-    Fail-fast on errors so the web request still returns quickly.
-    """
+    """Return list[dict] rows for both Postgres and SQLite. Fail-fast on errors."""
     try:
         if using_postgres():
             with pg_connect() as conn:
@@ -87,7 +79,6 @@ def fetch_rows(query: str, params: tuple = ()):
     except Exception as e:
         print(f"[DB] fetch_rows error: {e}")
         return []
-
 
 def fetch_one(query: str, params: tuple = ()):
     try:
@@ -108,11 +99,9 @@ def fetch_one(query: str, params: tuple = ()):
         print(f"[DB] fetch_one error: {e}")
         return None
 
-
 # ---------------- Queries ----------------
 def get_recent_stories(limit=12, search=None, page=1):
     offset = max(page - 1, 0) * limit
-
     cache_key = ("recent", limit, search or "", page, "pg" if using_postgres() else "sqlite")
     cached = _cache_get(cache_key)
     if cached is not None:
@@ -159,10 +148,8 @@ def get_recent_stories(limit=12, search=None, page=1):
     _cache_set(cache_key, rows)
     return rows
 
-
 def get_topic_stories(topic, limit=12, page=1):
     offset = max(page - 1, 0) * limit
-
     cache_key = ("topic", topic.lower(), limit, page, "pg" if using_postgres() else "sqlite")
     cached = _cache_get(cache_key)
     if cached is not None:
@@ -190,8 +177,6 @@ def get_topic_stories(topic, limit=12, page=1):
     _cache_set(cache_key, rows)
     return rows
 
-
-
 def get_latest_update_iso():
     cache_key = ("latest_update", "pg" if using_postgres() else "sqlite")
     cached = _cache_get(cache_key)
@@ -200,22 +185,17 @@ def get_latest_update_iso():
 
     q = "SELECT MAX(added_at) FROM public.articles" if using_postgres() else "SELECT MAX(added_at) FROM articles"
     val = fetch_one(q)
-
     if not val:
         _cache_set(cache_key, None)
         return None
 
-    # Postgres returns datetime; SQLite returns string
     if isinstance(val, datetime):
-        dt = val
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+        dt = val if val.tzinfo else val.replace(tzinfo=timezone.utc)
         iso = dt.astimezone(timezone.utc).isoformat()
     else:
         try:
             dt = datetime.fromisoformat(str(val).replace("Z", "+00:00"))
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
             iso = dt.astimezone(timezone.utc).isoformat()
         except Exception:
             iso = None
@@ -223,24 +203,216 @@ def get_latest_update_iso():
     _cache_set(cache_key, iso)
     return iso
 
-
 def get_all_topics():
+    # Keep your existing list
     return [
-        "Bitcoin", "China", "Conspiracy", "Corruption", "Court", "Election",
-        "Executive order", "Fbi", "Iran", "Israel", "Lawsuit", "Nuclear",
-        "Putin", "Russia", "Saudi", "Trump", "Voter",
-        "Injunction", "Rico", "Conspiracy theory", "Qanon", "Ufo", "Maha",
-        "Netanyahu", "Erdogan", "Lavrov", "Board of peace", "Congo", "Sahel"
+        "Bitcoin","China","Conspiracy","Corruption","Court","Election","Executive order","Fbi","Iran","Israel",
+        "Lawsuit","Nuclear","Putin","Russia","Saudi","Trump","Voter","Injunction","Rico","Conspiracy theory",
+        "Qanon","Ufo","Maha","Netanyahu","Erdogan","Lavrov","Board of peace","Congo","Sahel"
     ]
 
+def serialize_story(s):
+    # Normalize added_at to string
+    ts = s.get("added_at")
+    if isinstance(ts, datetime):
+        ts = (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)).astimezone(timezone.utc).isoformat()
+    elif ts is not None:
+        ts = str(ts)
+    return {
+        "title": s.get("title"),
+        "link": s.get("link"),
+        "topic": s.get("topic") or "",
+        "summary": s.get("summary") or "",
+        "added_at": ts or "",
+    }
 
 # ---------------- Fast health endpoint (NO DB!) ----------------
 @app.get("/health")
 def health():
     return "ok", 200
 
+# ---------------- JSON API for append paging ----------------
+@app.get("/api/stories")
+def api_stories():
+    q = request.args.get("q", "").strip() or None
+    topic = request.args.get("topic", "").strip() or None
+    page = max(int(request.args.get("page", "1") or "1"), 1)
+    limit = max(int(request.args.get("limit", str(PAGE_SIZE_DEFAULT)) or PAGE_SIZE_DEFAULT), 1)
+
+    if topic:
+        rows = get_topic_stories(topic, limit=limit, page=page)
+    else:
+        rows = get_recent_stories(limit=limit, search=q, page=page)
+
+    return jsonify({
+        "page": page,
+        "limit": limit,
+        "count": len(rows),
+        "stories": [serialize_story(r) for r in rows],
+    })
 
 # ---------------- Routes ----------------
+BASE_HTML = """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>{{ page_title }}</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; margin:0; line-height:1.45; }
+    header { position: sticky; top: 0; backdrop-filter: blur(8px); background: rgba(255,255,255,.85); border-bottom: 1px solid rgba(0,0,0,.08); }
+    @media (prefers-color-scheme: dark){ header{ background: rgba(0,0,0,.55); border-bottom-color: rgba(255,255,255,.10);} }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 14px 16px; }
+    .row { display:flex; gap:10px; flex-wrap: wrap; align-items:center; justify-content: space-between; }
+    .brand { font-weight: 800; letter-spacing: .3px; }
+    .muted { opacity: .75; font-size: 12px; }
+    .topics { display:flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .chip { font-size: 12px; padding: 6px 10px; border-radius: 999px; border:1px solid rgba(0,0,0,.12); text-decoration:none; }
+    @media (prefers-color-scheme: dark){ .chip{ border-color: rgba(255,255,255,.18);} }
+    form { display:flex; gap:8px; align-items:center; }
+    input[type="search"] { padding: 10px 12px; border-radius: 10px; border:1px solid rgba(0,0,0,.15); min-width: 260px; }
+    @media (prefers-color-scheme: dark){ input[type="search"]{ border-color: rgba(255,255,255,.20);} }
+    button { padding: 10px 12px; border-radius: 10px; border:1px solid rgba(0,0,0,.15); cursor:pointer; }
+    @media (prefers-color-scheme: dark){ button{ border-color: rgba(255,255,255,.20);} }
+    main { padding: 18px 0 44px; }
+    .ad { border:1px dashed rgba(0,0,0,.25); border-radius: 14px; padding: 12px; margin: 14px 0 18px; opacity:.75; }
+    @media (prefers-color-scheme: dark){ .ad{ border-color: rgba(255,255,255,.25);} }
+    .card { border:1px solid rgba(0,0,0,.10); border-radius: 16px; padding: 14px 14px 12px; margin: 10px 0; box-shadow: 0 6px 18px rgba(0,0,0,.04); }
+    @media (prefers-color-scheme: dark){ .card{ border-color: rgba(255,255,255,.12); box-shadow:none;} }
+    .title { font-weight: 700; text-decoration:none; }
+    .meta { margin-top: 8px; display:flex; gap:10px; flex-wrap: wrap; align-items:center; }
+    .pill { font-size: 12px; padding: 3px 8px; border-radius: 999px; border:1px solid rgba(0,0,0,.12); opacity:.9; }
+    @media (prefers-color-scheme: dark){ .pill{ border-color: rgba(255,255,255,.18);} }
+    .summary { margin-top: 10px; opacity: .95; }
+    .footer { margin-top: 26px; opacity:.7; font-size: 12px; }
+    .center { text-align:center; }
+  </style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <div class="row">
+      <div>
+        <div class="brand">News Aggregator</div>
+        <div class="muted">Real-time updates on your tracked topics{% if last_updated_iso %} • Last updated: {{ last_updated_iso }}{% endif %}</div>
+      </div>
+
+      <form method="get" action="{{ search_action }}">
+        <input type="search" name="q" placeholder="Search titles, topics, summaries" value="{{ q }}" />
+        <button type="submit">Search</button>
+      </form>
+    </div>
+
+    <div class="topics">
+      <a class="chip" href="{{ url_for('home') }}">All Topics</a>
+      {% for t in topics %}
+        <a class="chip" href="{{ url_for('topic_page', topic=t) }}">{{ t|capitalize }}</a>
+      {% endfor %}
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="ad">Advertisement / Sponsored Content Placeholder (728×90)</div>
+
+  <main>
+    <h2 style="margin: 0 0 10px;">{{ heading }}</h2>
+
+    <div id="stories">
+      {% for story in stories %}
+        <article class="card">
+          <a class="title" href="{{ story['link'] }}" target="_blank" rel="noopener noreferrer">{{ story['title'] }}</a>
+          {% if story['summary'] %}
+            <div class="summary">{{ story['summary'] | replace('\\n','<br>') | safe }}</div>
+          {% endif %}
+          <div class="meta">
+            <span class="pill">{{ (story['topic'] or '') | capitalize }}</span>
+            {% if story['added_at'] %}<span class="muted">{{ story['added_at'] }}</span>{% endif %}
+          </div>
+        </article>
+      {% endfor %}
+    </div>
+
+    <div class="center" style="margin-top: 14px;">
+      <button id="loadMore" data-page="{{ page }}" data-topic="{{ topic or '' }}" data-q="{{ q }}">Load more</button>
+      <div id="loadStatus" class="muted" style="margin-top:8px;"></div>
+      <noscript>
+        <div class="muted" style="margin-top:10px;">
+          JavaScript is off — use paging:
+          {% if page > 1 %}<a href="{{ page_url(page-1) }}">Newer</a>{% endif %}
+          <a href="{{ page_url(page+1) }}">Older</a>
+        </div>
+      </noscript>
+    </div>
+
+    <div class="footer">© {{ now_year }} News Aggregator</div>
+  </main>
+</div>
+
+<script>
+(function() {
+  const btn = document.getElementById('loadMore');
+  const status = document.getElementById('loadStatus');
+  const list = document.getElementById('stories');
+
+  function escapeHtml(s) {
+    return (s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  async function loadNext() {
+    const nextPage = (parseInt(btn.dataset.page || '1', 10) + 1);
+    const q = btn.dataset.q || '';
+    const topic = btn.dataset.topic || '';
+    const params = new URLSearchParams({ page: String(nextPage) });
+    if (q) params.set('q', q);
+    if (topic) params.set('topic', topic);
+
+    btn.disabled = true;
+    status.textContent = 'Loading…';
+
+    try {
+      const res = await fetch('/api/stories?' + params.toString(), { headers: { 'Accept': 'application/json' } });
+      const data = await res.json();
+
+      if (!data.stories || data.stories.length === 0) {
+        status.textContent = 'No more stories.';
+        btn.style.display = 'none';
+        return;
+      }
+
+      for (const s of data.stories) {
+        const el = document.createElement('article');
+        el.className = 'card';
+        el.innerHTML = `
+          <a class="title" href="${escapeHtml(s.link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(s.title)}</a>
+          ${s.summary ? `<div class="summary">${escapeHtml(s.summary).replace(/\\n/g,'<br>')}</div>` : ''}
+          <div class="meta">
+            <span class="pill">${escapeHtml((s.topic||'').toString()).replace(/^./, c => c.toUpperCase())}</span>
+            ${s.added_at ? `<span class="muted">${escapeHtml(s.added_at)}</span>` : ''}
+          </div>
+        `;
+        list.appendChild(el);
+      }
+
+      btn.dataset.page = String(nextPage);
+      status.textContent = '';
+    } catch (e) {
+      status.textContent = 'Error loading more. Try again.';
+      console.log(e);
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  btn.addEventListener('click', loadNext);
+})();
+</script>
+</body>
+</html>
+"""
+
 @app.route("/")
 def home():
     q = request.args.get("q", "").strip()
@@ -251,321 +423,57 @@ def home():
     stories = get_recent_stories(limit=PAGE_SIZE_DEFAULT, search=q if q else None, page=page)
     now_year = datetime.now().year
 
-    html = """
-    <!DOCTYPE html>
-    <html lang="en" class="dark">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>News Aggregator</title>
-        <script src="https://cdn.tailwindcss.com"></script>
-        <script>
-            tailwind.config = { darkMode: 'class' }
-        </script>
-    </head>
-    <body class="bg-gray-950 text-gray-200 min-h-screen">
-        <header class="bg-gradient-to-r from-blue-700 to-indigo-800 py-8 shadow-lg">
-            <div class="container mx-auto px-6 text-center">
-                <h1 class="text-5xl font-bold">News Aggregator</h1>
-                <p class="mt-2 text-blue-200">Real-time updates on your tracked topics</p>
+    def page_url(p):
+        args = {}
+        if q:
+            args["q"] = q
+        args["page"] = p
+        return url_for("home", **args)
 
-                {% if last_updated_iso %}
-                  <p class="mt-1 text-sm text-blue-300">
-                    Last updated:
-                    <span class="js-local-dt" data-iso="{{ last_updated_iso }}">{{ last_updated_iso }}</span>
-                  </p>
-                {% else %}
-                  <p class="mt-1 text-sm text-blue-300">Last updated: Never</p>
-                {% endif %}
-            </div>
-        </header>
-
-        <div class="bg-gray-900 border-b border-gray-800">
-            <div class="container mx-auto px-6">
-                <div class="hidden md:flex flex-wrap gap-3 py-4 justify-center">
-                    <a href="/"
-                       class="px-5 py-2.5 rounded-full font-medium transition {{ 'bg-red-600 text-white' if (active_topic is none) else 'bg-gray-800 hover:bg-gray-700' }}">
-                        All Topics
-                    </a>
-                    {% for t in topics %}
-                    <a href="/topic/{{ t | urlencode }}"
-                       class="px-5 py-2.5 rounded-full font-medium transition {{ 'bg-red-600 text-white' if t == active_topic else 'bg-gray-800 hover:bg-gray-700' }}">
-                        {{ t | capitalize }}
-                    </a>
-                    {% endfor %}
-                </div>
-
-                <div class="md:hidden py-4">
-                    <select onchange="window.location.href=this.value"
-                            class="w-full bg-gray-800 border border-gray-700 rounded-full px-5 py-3 text-lg">
-                        <option value="/" {{ 'selected' if (active_topic is none) else '' }}>All Topics</option>
-                        {% for t in topics %}
-                        <option value="/topic/{{ t | urlencode }}" {{ 'selected' if t == active_topic else '' }}>
-                            {{ t | capitalize }}
-                        </option>
-                        {% endfor %}
-                    </select>
-                </div>
-            </div>
-        </div>
-
-        <div class="container mx-auto px-6 py-6">
-            <form method="GET" class="max-w-3xl mx-auto">
-                <input type="text" name="q" value="{{ q }}"
-                       placeholder="Search titles or topics..."
-                       class="w-full bg-gray-900 border border-gray-700 rounded-2xl px-6 py-4 text-lg focus:outline-none focus:border-blue-500">
-            </form>
-        </div>
-
-        <div class="container mx-auto px-6 pb-6">
-            <div class="max-w-3xl mx-auto mb-8 bg-gray-900 rounded-2xl p-6 text-center text-gray-500 border border-gray-800">
-                <p>Advertisement / Sponsored Content Placeholder</p>
-                <p class="text-xs mt-1 text-gray-500">(728x90 leaderboard - static, below search bar)</p>
-            </div>
-        </div>
-
-        <main class="container mx-auto px-6 pb-12">
-            <h2 class="text-3xl font-bold mb-8">Latest Stories</h2>
-
-            {% if stories %}
-            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {% for story in stories %}
-                <div class="bg-gray-900 rounded-2xl overflow-hidden border border-gray-800 hover:border-blue-600 transition">
-                    <div class="p-6">
-                        <h3 class="text-xl font-semibold mb-4">{{ story['title'] }}</h3>
-
-                        {% if story['summary'] %}
-                        <div class="text-gray-300 text-sm whitespace-pre-line leading-relaxed mb-6">
-                            {{ story['summary'] | replace('\\n', '<br>') | safe }}
-                        </div>
-                        {% endif %}
-
-                        <div class="flex items-center justify-between">
-                            <span class="bg-blue-900 text-blue-300 px-4 py-1 rounded-full text-xs font-medium">
-                                {{ (story['topic'] or '') | capitalize }}
-                            </span>
-
-                            {% if story['added_at'] %}
-                              <span class="text-gray-500 text-sm js-local-dt"
-                                    data-iso="{{ story['added_at'].isoformat() if story['added_at'].__class__.__name__ == 'datetime' else story['added_at'] }}">
-                                {{ story['added_at'] }}
-                              </span>
-                            {% endif %}
-                        </div>
-
-                        <a href="{{ story['link'] }}" target="_blank"
-                           class="mt-6 block text-center bg-red-600 hover:bg-red-500 transition py-3 rounded-xl font-medium">
-                            Read Original →
-                        </a>
-                    </div>
-                </div>
-                {% endfor %}
-            </div>
-
-            <div class="flex justify-center gap-4 mt-10">
-                {% if page > 1 %}
-                  <a class="px-6 py-3 rounded-xl bg-gray-800 hover:bg-gray-700 transition"
-                     href="/?q={{ q | urlencode }}&page={{ page - 1 }}">Newer</a>
-                {% endif %}
-                <a class="px-6 py-3 rounded-xl bg-gray-800 hover:bg-gray-700 transition"
-                   href="/?q={{ q | urlencode }}&page={{ page + 1 }}">Load more</a>
-            </div>
-
-            {% else %}
-            <p class="text-center text-gray-400">
-              No stories found (or DB timed out briefly). Refresh in a few seconds.
-            </p>
-            {% endif %}
-        </main>
-
-        <footer class="bg-gray-950 py-8 text-center text-gray-500 text-sm">
-            © {{ now_year }} News Aggregator
-        </footer>
-
-        <script>
-        function formatLocal(iso) {
-          try {
-            const d = new Date(iso);
-            if (isNaN(d.getTime())) return null;
-            const datePart = d.toLocaleDateString(undefined, { year:'numeric', month:'2-digit', day:'2-digit' });
-            const timePart = d.toLocaleTimeString(undefined, { hour:'2-digit', minute:'2-digit' });
-            return datePart + " " + timePart;
-          } catch(e) { return null; }
-        }
-
-        document.querySelectorAll(".js-local-dt").forEach(el => {
-          const iso = el.getAttribute("data-iso") || el.textContent;
-          const v = formatLocal(iso);
-          if (v) el.textContent = v;
-        });
-        </script>
-    </body>
-    </html>
-    """
     return render_template_string(
-        html,
+        BASE_HTML,
+        page_title="News Aggregator",
+        heading="Latest Stories",
         stories=stories,
         topics=topics,
         q=q,
         page=page,
-        active_topic=None,
+        topic=None,
+        search_action=url_for("home"),
         last_updated_iso=last_updated_iso,
-        now_year=now_year
+        now_year=now_year,
+        page_url=page_url,
     )
-
 
 @app.route("/topic/<topic>")
 def topic_page(topic):
     page = max(int(request.args.get("page", "1") or "1"), 1)
-
     topics = get_all_topics()
     last_updated_iso = get_latest_update_iso()
     stories = get_topic_stories(topic, limit=PAGE_SIZE_DEFAULT, page=page)
     now_year = datetime.now().year
 
-    html = """
-    <!DOCTYPE html>
-    <html lang="en" class="dark">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>{{ topic | capitalize }} - News Aggregator</title>
-        <script src="https://cdn.tailwindcss.com"></script>
-        <script>
-            tailwind.config = { darkMode: 'class' }
-        </script>
-    </head>
-    <body class="bg-gray-950 text-gray-200 min-h-screen">
-        <header class="bg-gradient-to-r from-blue-700 to-indigo-800 py-8 shadow-lg">
-            <div class="container mx-auto px-6 text-center">
-                <h1 class="text-5xl font-bold">News Aggregator</h1>
-                <p class="mt-2 text-blue-200">Real-time updates on your tracked topics</p>
+    def page_url(p):
+        return url_for("topic_page", topic=topic, page=p)
 
-                {% if last_updated_iso %}
-                  <p class="mt-1 text-sm text-blue-300">
-                    Last updated:
-                    <span class="js-local-dt" data-iso="{{ last_updated_iso }}">{{ last_updated_iso }}</span>
-                  </p>
-                {% else %}
-                  <p class="mt-1 text-sm text-blue-300">Last updated: Never</p>
-                {% endif %}
-            </div>
-        </header>
-
-        <div class="bg-gray-900 border-b border-gray-800">
-            <div class="container mx-auto px-6">
-                <div class="hidden md:flex flex-wrap gap-3 py-4 justify-center">
-                    <a href="/" class="px-6 py-2.5 rounded-full font-medium transition bg-gray-800 hover:bg-gray-700">
-                        All Topics
-                    </a>
-                    {% for t in topics %}
-                    <a href="/topic/{{ t | urlencode }}"
-                       class="px-6 py-2.5 rounded-full font-medium transition {{ 'bg-red-600 text-white' if t == topic else 'bg-gray-800 hover:bg-gray-700' }}">
-                        {{ t | capitalize }}
-                    </a>
-                    {% endfor %}
-                </div>
-                <div class="md:hidden py-4">
-                    <select onchange="window.location.href=this.value"
-                            class="w-full bg-gray-800 border border-gray-700 rounded-full px-5 py-3 text-lg">
-                        <option value="/">All Topics</option>
-                        {% for t in topics %}
-                        <option value="/topic/{{ t | urlencode }}" {{ 'selected' if t == topic else '' }}>
-                            {{ t | capitalize }}
-                        </option>
-                        {% endfor %}
-                    </select>
-                </div>
-            </div>
-        </div>
-
-        <main class="container mx-auto px-6 py-10">
-            <h2 class="text-3xl font-bold mb-8">{{ topic | capitalize }} News</h2>
-
-            {% if stories %}
-            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {% for story in stories %}
-                <div class="bg-gray-900 rounded-2xl overflow-hidden border border-gray-800 hover:border-blue-600 transition">
-                    <div class="p-6">
-                        <h3 class="text-xl font-semibold mb-4">{{ story['title'] }}</h3>
-
-                        {% if story['summary'] %}
-                        <div class="text-gray-300 text-sm whitespace-pre-line leading-relaxed mb-6">
-                            {{ story['summary'] | replace('\\n', '<br>') | safe }}
-                        </div>
-                        {% endif %}
-
-                        <div class="flex items-center justify-between">
-                            <span class="bg-blue-900 text-blue-300 px-4 py-1 rounded-full text-xs font-medium">
-                                {{ (story['topic'] or '') | capitalize }}
-                            </span>
-                            {% if story['added_at'] %}
-                              <span class="text-gray-500 text-sm js-local-dt"
-                                    data-iso="{{ story['added_at'].isoformat() if story['added_at'].__class__.__name__ == 'datetime' else story['added_at'] }}">
-                                {{ story['added_at'] }}
-                              </span>
-                            {% endif %}
-                        </div>
-
-                        <a href="{{ story['link'] }}" target="_blank"
-                           class="mt-6 block text-center bg-red-600 hover:bg-red-500 transition py-3 rounded-xl font-medium">
-                            Read Original →
-                        </a>
-                    </div>
-                </div>
-                {% endfor %}
-            </div>
-
-            <div class="flex justify-center gap-4 mt-10">
-                {% if page > 1 %}
-                  <a class="px-6 py-3 rounded-xl bg-gray-800 hover:bg-gray-700 transition"
-                     href="/topic/{{ topic | urlencode }}?page={{ page - 1 }}">Newer</a>
-                {% endif %}
-                <a class="px-6 py-3 rounded-xl bg-gray-800 hover:bg-gray-700 transition"
-                   href="/topic/{{ topic | urlencode }}?page={{ page + 1 }}">Load more</a>
-            </div>
-
-            {% else %}
-              <p class="text-center text-gray-400">
-                No stories found (or DB timed out briefly). Refresh in a few seconds.
-              </p>
-            {% endif %}
-        </main>
-
-        <footer class="bg-gray-950 py-8 text-center text-gray-500 text-sm">
-            © {{ now_year }} News Aggregator
-        </footer>
-
-        <script>
-        function formatLocal(iso) {
-          try {
-            const d = new Date(iso);
-            if (isNaN(d.getTime())) return null;
-            const datePart = d.toLocaleDateString(undefined, { year:'numeric', month:'2-digit', day:'2-digit' });
-            const timePart = d.toLocaleTimeString(undefined, { hour:'2-digit', minute:'2-digit' });
-            return datePart + " " + timePart;
-          } catch(e) { return null; }
-        }
-
-        document.querySelectorAll(".js-local-dt").forEach(el => {
-          const iso = el.getAttribute("data-iso") || el.textContent;
-          const v = formatLocal(iso);
-          if (v) el.textContent = v;
-        });
-        </script>
-    </body>
-    </html>
-    """
     return render_template_string(
-        html,
+        BASE_HTML,
+        page_title=f"{topic.capitalize()} - News Aggregator",
+        heading=f"{topic.capitalize()} News",
         stories=stories,
         topics=topics,
-        topic=topic,
+        q="",
         page=page,
+        topic=topic,
+        search_action=url_for("topic_page", topic=topic),
         last_updated_iso=last_updated_iso,
-        now_year=now_year
+        now_year=now_year,
+        page_url=page_url,
     )
-
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
+'@
+
+Set-Content -Path $path -Value $txt -Encoding utf8
+"OK: updated app.py (append load more + styling + api)"
