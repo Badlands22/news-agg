@@ -2,34 +2,19 @@ from flask import Flask, render_template_string, request
 from datetime import datetime, timezone
 import os
 
-# Postgres driver
 import psycopg
 from psycopg.rows import dict_row
 
 app = Flask(__name__)
-@app.route("/debug")
-def debug():
-    import os
-    try:
-        import psycopg
-        psycopg_ok = True
-    except Exception as e:
-        psycopg_ok = False
 
-    has_db_url = bool(os.getenv("DATABASE_URL"))
-    return {
-        "psycopg_installed": psycopg_ok,
-        "has_DATABASE_URL": has_db_url
-    }
-
-
+# Render provides this in your service Environment variables
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 
 def pg_connect():
     if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL is not set in this service (news-agg).")
-    # Render Postgres URLs work directly with psycopg
+        raise RuntimeError("DATABASE_URL is not set for news-agg.")
+    # dict_row makes rows behave like {"title": "..."} so your template indexing works
     return psycopg.connect(DATABASE_URL, row_factory=dict_row)
 
 
@@ -40,7 +25,9 @@ def get_recent_stories(limit=12, search=None):
                 query = """
                     SELECT title, link, topic, summary, added_at
                     FROM public.articles
-                    WHERE title ILIKE %s OR topic ILIKE %s OR COALESCE(summary,'') ILIKE %s
+                    WHERE title ILIKE %s
+                       OR topic ILIKE %s
+                       OR COALESCE(summary,'') ILIKE %s
                     ORDER BY added_at DESC
                     LIMIT %s
                 """
@@ -70,7 +57,7 @@ def get_topic_stories(topic, limit=12):
 
 
 def get_all_topics():
-    # Keep your hardcoded topic list exactly as-is
+    # Hardcoded full list so all topics always show
     return [
         "All Topics", "Bitcoin", "China", "Conspiracy", "Corruption", "Court", "Election",
         "Executive order", "Fbi", "Iran", "Israel", "Lawsuit", "Nuclear",
@@ -83,15 +70,10 @@ def get_all_topics():
 def get_latest_update():
     with pg_connect() as conn:
         with conn.cursor() as c:
-            c.execute("SELECT MAX(added_at) FROM public.articles;")
-            result = c.fetchone()
-            if not result:
-                return "Never"
-
-            ts = result["max"]  # dict_row gives column name "max"
+            c.execute("SELECT MAX(added_at) AS max_added_at FROM public.articles;")
+            row = c.fetchone()
+            ts = row["max_added_at"] if row else None
             if ts:
-                # ts is already a datetime from Postgres
-                # Display in UTC like your original
                 ts_utc = ts.astimezone(timezone.utc)
                 return ts_utc.strftime("%Y-%m-%d %H:%M UTC")
             return "Never"
@@ -158,7 +140,7 @@ def home():
             </form>
         </div>
 
-        <!-- Ad Banner -->
+        <!-- Ad Banner (static, right below search bar, part of page flow) -->
         <div class="container mx-auto px-6 pb-6">
             <div class="max-w-3xl mx-auto mb-8 bg-gray-900 rounded-2xl p-6 text-center text-gray-500 border border-gray-800">
                 <p>Advertisement / Sponsored Content Placeholder</p>
@@ -208,7 +190,13 @@ def home():
     </html>
     """
     now_year = datetime.now().year
-    return render_template_string(html, stories=stories, topics=topics, last_updated=last_updated, now_year=now_year)
+    return render_template_string(
+        html,
+        stories=stories,
+        topics=topics,
+        last_updated=last_updated,
+        now_year=now_year
+    )
 
 
 @app.route('/topic/<topic>')
@@ -216,6 +204,7 @@ def topic_page(topic):
     stories = get_topic_stories(topic, limit=12)
     topics = get_all_topics()
     last_updated = get_latest_update()
+
     html = """
     <!DOCTYPE html>
     <html lang="en" class="dark">
@@ -289,7 +278,14 @@ def topic_page(topic):
     </html>
     """
     now_year = datetime.now().year
-    return render_template_string(html, stories=stories, topics=topics, topic=topic, last_updated=last_updated, now_year=now_year)
+    return render_template_string(
+        html,
+        stories=stories,
+        topics=topics,
+        topic=topic,
+        last_updated=last_updated,
+        now_year=now_year
+    )
 
 
 if __name__ == '__main__':
