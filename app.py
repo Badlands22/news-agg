@@ -13,12 +13,14 @@ except Exception:
 
 app = Flask(__name__)
 
+# ✅ stamp so we can verify the live code instantly
+APP_BUILD = "brfix-2026-02-14-2"
+
 DB_PATH = os.getenv("DB_PATH", "news.db")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 PAGE_SIZE_DEFAULT = 12
 
-# small in-process cache (helps during deploy/health checks)
 CACHE_TTL_SECONDS = 10
 _cache = {}  # key -> (expires_epoch, value)
 
@@ -53,23 +55,25 @@ def normalize_topic_label(topic: str) -> str:
 
 def normalize_summary_for_display(text: str) -> str:
     """
-    Bulletproof conversion of any <br> variants (and escaped &lt;br&gt;) into real newlines.
-    This ensures the UI never shows literal '<br>'.
+    Convert ANY <br> variants (and escaped &lt;br&gt;) to newline.
+    Also handle weird spacing like <br > or <br    />.
     """
     if not text:
         return ""
 
     t = str(text)
 
-    # handle escaped <br> forms first
+    # Handle escaped variants first
     t = t.replace("&lt;br&gt;", "\n").replace("&lt;br/&gt;", "\n").replace("&lt;br /&gt;", "\n")
 
-    # handle ANY <br> tag variant: <br>, <br/>, <br />, <br >, any case
-    t = re.sub(r"(?i)<br\s*/?\s*>", "\n", t)
+    # Handle ANY <br ...> variant (case-insensitive)
+    t = re.sub(r"(?i)<\s*br\s*/?\s*>", "\n", t)
 
-    # normalize line endings
+    # Also handle double-escaped cases (rare): &amp;lt;br&amp;gt;
+    t = t.replace("&amp;lt;br&amp;gt;", "\n").replace("&amp;lt;br/&amp;gt;", "\n").replace("&amp;lt;br /&amp;gt;", "\n")
+
+    # Normalize newlines
     t = t.replace("\r\n", "\n").replace("\r", "\n")
-
     return t.strip()
 
 
@@ -79,9 +83,6 @@ def using_postgres() -> bool:
 
 
 def pg_connect():
-    """
-    Fail-fast. statement_timeout is ms.
-    """
     if psycopg is None:
         raise RuntimeError("psycopg not installed. Add psycopg[binary] to requirements.txt")
     conn = psycopg.connect(
@@ -205,9 +206,6 @@ def get_recent_stories(limit=12, search=None, page=1):
 
 
 def get_topic_stories(topic, limit=12, page=1):
-    """
-    Case-insensitive match so clicking 'Trump' includes rows where topic is 'trump', 'TRUMP', etc.
-    """
     offset = max(page - 1, 0) * limit
     cache_key = ("topic", (topic or "").lower(), limit, page, "pg" if using_postgres() else "sqlite")
     cached = _cache_get(cache_key)
@@ -266,35 +264,10 @@ def get_latest_update_iso():
 
 def get_all_topics():
     return [
-        "Bitcoin",
-        "China",
-        "Conspiracy",
-        "Corruption",
-        "Court",
-        "Election",
-        "Executive Order",
-        "FBI",
-        "Iran",
-        "Israel",
-        "Lawsuit",
-        "Nuclear",
-        "Putin",
-        "Russia",
-        "Saudi",
-        "Trump",
-        "Voter",
-        "Injunction",
-        "RICO",
-        "Conspiracy Theory",
-        "QAnon",
-        "UFO",
-        "MAHA",
-        "Netanyahu",
-        "Erdogan",
-        "Lavrov",
-        "Board of Peace",
-        "Congo",
-        "Sahel",
+        "Bitcoin", "China", "Conspiracy", "Corruption", "Court", "Election", "Executive Order",
+        "FBI", "Iran", "Israel", "Lawsuit", "Nuclear", "Putin", "Russia", "Saudi", "Trump",
+        "Voter", "Injunction", "RICO", "Conspiracy Theory", "QAnon", "UFO", "MAHA",
+        "Netanyahu", "Erdogan", "Lavrov", "Board of Peace", "Congo", "Sahel",
     ]
 
 
@@ -318,13 +291,17 @@ def serialize_story(s):
     }
 
 
-# ---------------- Fast health endpoint (NO DB) ----------------
+# ---------------- Routes ----------------
 @app.get("/health")
 def health():
     return "ok", 200
 
 
-# ---------------- API for append-style pagination ----------------
+@app.get("/version")
+def version():
+    return {"app_build": APP_BUILD, "utc": datetime.now(timezone.utc).isoformat()}
+
+
 @app.get("/api/stories")
 def api_stories():
     q = request.args.get("q", "").strip() or None
@@ -337,14 +314,7 @@ def api_stories():
     else:
         rows = get_recent_stories(limit=limit, search=q, page=page)
 
-    return jsonify(
-        {
-            "page": page,
-            "limit": limit,
-            "count": len(rows),
-            "stories": [serialize_story(r) for r in rows],
-        }
-    )
+    return jsonify({"page": page, "limit": limit, "count": len(rows), "stories": [serialize_story(r) for r in rows]})
 
 
 BASE_HTML = r"""
@@ -356,22 +326,11 @@ BASE_HTML = r"""
   <title>{{ page_title }}</title>
   <style>
     :root{
-      --bg:#0a0f16;
-      --panel:#0f1824;
-      --panel2:#0c131d;
-
-      --text:#e7eef7;
-      --muted:#9fb0c5;
-
+      --bg:#0a0f16; --text:#e7eef7; --muted:#9fb0c5;
       --pillBorder:rgba(255,255,255,.16);
-
-      --red:#ff2a2a;
-      --red2:#d91f1f;
-
-      --link:#8ab4ff;
-      --shadow: 0 12px 40px rgba(0,0,0,.55);
+      --red:#ff2a2a; --red2:#d91f1f;
+      --link:#8ab4ff; --shadow:0 12px 40px rgba(0,0,0,.55);
     }
-
     *{box-sizing:border-box}
     body{
       margin:0;
@@ -385,157 +344,79 @@ BASE_HTML = r"""
     }
     a{color:var(--link);text-decoration:none}
     a:hover{text-decoration:underline}
-
     .wrap{max-width:1100px;margin:0 auto;padding:16px}
-
     .top{
-      border-radius:22px;
-      padding:16px 16px 14px;
+      border-radius:22px;padding:16px 16px 14px;
       border:1px solid rgba(255,255,255,.10);
       background: linear-gradient(180deg, rgba(15,24,36,.92), rgba(12,19,29,.72));
       box-shadow: var(--shadow);
     }
-    .title{font-size:28px;font-weight:900;margin:0;letter-spacing:.2px}
+    .title{font-size:28px;font-weight:900;margin:0}
     .sub{margin:6px 0 0;color:var(--muted);font-size:13px}
-
     .searchbar{margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
     .searchbar input{
-      flex:1;
-      min-width:min(520px, 78vw);
-      padding:12px 14px;
-      border-radius:14px;
+      flex:1;min-width:min(520px, 78vw);
+      padding:12px 14px;border-radius:14px;
       border:1px solid rgba(255,255,255,.14);
-      background: rgba(7,11,16,.75);
-      color:var(--text);
-      outline:none;
-    }
-    .searchbar input:focus{
-      border-color: rgba(138,180,255,.35);
-      box-shadow: 0 0 0 3px rgba(138,180,255,.12);
+      background: rgba(7,11,16,.75);color:var(--text);outline:none;
     }
     .searchbar button{
-      padding:12px 16px;
-      border-radius:14px;
+      padding:12px 16px;border-radius:14px;
       border:1px solid rgba(255,42,42,.55);
       background:linear-gradient(180deg,var(--red),var(--red2));
-      color:white;
-      font-weight:900;
-      cursor:pointer;
-      box-shadow: 0 10px 26px rgba(255,42,42,.18);
+      color:white;font-weight:900;cursor:pointer;
     }
-    .searchbar button:hover{filter:brightness(1.05)}
-    .searchbar button:active{transform:translateY(1px)}
-
     .pills{margin-top:14px;display:flex;gap:10px;flex-wrap:wrap}
     .pill{
-      display:inline-flex;
-      align-items:center;
-      gap:8px;
-      padding:9px 12px;
-      border-radius:999px;
+      display:inline-flex;align-items:center;
+      padding:9px 12px;border-radius:999px;
       border:1px solid var(--pillBorder);
       background: linear-gradient(180deg, rgba(18,31,46,.95), rgba(10,18,28,.85));
-      color:var(--text);
-      font-size:13px;
-      transition: all .12s ease;
+      color:var(--text);font-size:13px;transition:all .12s ease;
     }
-    .pill:hover{
-      background: linear-gradient(180deg, rgba(27,44,63,.95), rgba(12,21,33,.85));
-      border-color: rgba(138,180,255,.22);
-      transform: translateY(-1px);
-    }
+    .pill:hover{transform:translateY(-1px);border-color: rgba(138,180,255,.22);}
     .pill.active{
       border-color: rgba(255,42,42,.70);
       box-shadow: 0 0 0 3px rgba(255,42,42,.12) inset, 0 10px 26px rgba(255,42,42,.12);
     }
-
-    .ad{
-      margin:16px 0 10px;
-      border:1px dashed rgba(255,255,255,.26);
-      border-radius:18px;
-      padding:14px;
-      background: rgba(255,255,255,.03);
-      color:var(--muted);
-      text-align:center;
-    }
-
+    .ad{margin:16px 0 10px;border:1px dashed rgba(255,255,255,.26);border-radius:18px;padding:14px;color:var(--muted);text-align:center}
     h2{margin:18px 0 10px;font-size:28px}
-
-    .cards{margin-top:10px}
     .card{
       border:1px solid rgba(255,255,255,.10);
-      border-radius:22px;
-      padding:16px;
+      border-radius:22px;padding:16px;
       background: linear-gradient(180deg, rgba(13,22,33,.82), rgba(10,16,24,.72));
       box-shadow: 0 16px 44px rgba(0,0,0,.38);
       margin:14px 0;
     }
     .card h3{margin:0 0 10px;font-size:18px;line-height:1.25}
-    .summary{
-      margin-top:6px;
-      color:#d7e2f1;
-    }
-    .meta{
-      margin-top:12px;
-      color:var(--muted);
-      font-size:12px;
-      display:flex;
-      gap:12px;
-      flex-wrap:wrap;
-      align-items:center;
-    }
-    .topicTag{
-      padding:4px 10px;
-      border-radius:999px;
-      border:1px solid rgba(255,255,255,.14);
-      background: rgba(255,255,255,.04);
-      color:#cfe0f7;
-      font-weight:700;
-      letter-spacing:.2px;
-    }
-
-    .btnrow{margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    .summary{margin-top:6px;color:#d7e2f1}
+    .meta{margin-top:12px;color:var(--muted);font-size:12px;display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+    .topicTag{padding:4px 10px;border-radius:999px;border:1px solid rgba(255,255,255,.14);background: rgba(255,255,255,.04);color:#cfe0f7;font-weight:700}
     .readbtn{
-      display:inline-flex;
-      align-items:center;
-      gap:8px;
-      padding:11px 14px;
-      border-radius:14px;
+      display:inline-flex;align-items:center;
+      padding:11px 14px;border-radius:14px;
       border:1px solid rgba(255,42,42,.55);
       background:linear-gradient(180deg,var(--red),var(--red2));
-      color:white;
-      font-weight:900;
+      color:white;font-weight:900;
     }
-    .readbtn:hover{filter:brightness(1.05)}
-    .readbtn:active{transform:translateY(1px)}
-
     .loadwrap{margin:18px 0;display:flex;justify-content:center}
     #loadMore{
-      padding:12px 18px;
-      border-radius:16px;
+      padding:12px 18px;border-radius:16px;
       border:1px solid rgba(255,42,42,.55);
       background:linear-gradient(180deg,var(--red),var(--red2));
-      color:white;
-      font-weight:950;
-      cursor:pointer;
-      box-shadow: 0 14px 34px rgba(255,42,42,.16);
+      color:white;font-weight:950;cursor:pointer;
     }
-    #loadMore:hover{filter:brightness(1.05)}
-    #loadMore:active{transform:translateY(1px)}
     #loadStatus{margin-top:10px;text-align:center;color:var(--muted);font-size:12px}
-
-    footer{margin:26px 0 10px;color:var(--muted);font-size:12px;text-align:center}
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="top">
-      <div>
-        <h1 class="title">News Aggregator</h1>
-        <div class="sub">
-          Real-time updates on your tracked topics
-          {% if last_updated_iso %} • Last updated: {{ last_updated_iso }}{% endif %}
-        </div>
+      <h1 class="title">News Aggregator</h1>
+      <div class="sub">
+        Real-time updates on your tracked topics
+        {% if last_updated_iso %} • Last updated: {{ last_updated_iso }}{% endif %}
+        • Build: {{ app_build }}
       </div>
 
       <form class="searchbar" method="get" action="{{ search_action }}">
@@ -556,39 +437,28 @@ BASE_HTML = r"""
 
     <h2>{{ heading }}</h2>
 
-    <div id="stories" class="cards">
-      {% if stories %}
-        {% for story in stories %}
-          <div class="card">
-            <h3>{{ story['title'] }}</h3>
-
-            {% if story['summary'] %}
-              <div class="summary">
-                {{ (story['summary'] or '') | e | replace('\n','<br>') | safe }}
-              </div>
-            {% endif %}
-
-            <div class="meta">
-              <span class="topicTag">{{ story['topic_label'] }}</span>
-              {% if story['added_at'] %}<span>{{ story['added_at'] }}</span>{% endif %}
-            </div>
-
-            <div class="btnrow">
-              <a class="readbtn" href="{{ story['link'] }}" target="_blank" rel="noopener noreferrer">Read Original →</a>
-            </div>
+    <div id="stories">
+      {% for story in stories %}
+        <div class="card">
+          <h3>{{ story['title'] }}</h3>
+          {% if story['summary'] %}
+            <div class="summary">{{ story['summary'] | e | replace('\n','<br>') | safe }}</div>
+          {% endif %}
+          <div class="meta">
+            <span class="topicTag">{{ story['topic_label'] }}</span>
+            <span>{{ story['added_at'] }}</span>
           </div>
-        {% endfor %}
-      {% else %}
-        <div class="card">No stories found (or DB timed out briefly). Refresh in a few seconds.</div>
-      {% endif %}
+          <div style="margin-top:12px">
+            <a class="readbtn" href="{{ story['link'] }}" target="_blank" rel="noopener noreferrer">Read Original →</a>
+          </div>
+        </div>
+      {% endfor %}
     </div>
 
     <div class="loadwrap">
       <button id="loadMore" data-page="{{ page }}" data-topic="{{ active_topic or '' }}" data-q="{{ q }}">Load more</button>
     </div>
     <div id="loadStatus"></div>
-
-    <footer>© {{ now_year }} News Aggregator</footer>
   </div>
 
 <script>
@@ -608,7 +478,6 @@ BASE_HTML = r"""
     const summaryHtml = summaryText
       ? `<div class="summary">${escapeHtml(summaryText).replace(/\\n/g,'<br>')}</div>`
       : '';
-
     const topicLabel = escapeHtml(s.topic_label || s.topic || '');
     const added = escapeHtml(s.added_at || '');
     const title = escapeHtml(s.title || '');
@@ -622,7 +491,7 @@ BASE_HTML = r"""
           <span class="topicTag">${topicLabel}</span>
           ${added ? `<span>${added}</span>` : ``}
         </div>
-        <div class="btnrow">
+        <div style="margin-top:12px">
           <a class="readbtn" href="${link}" target="_blank" rel="noopener noreferrer">Read Original →</a>
         </div>
       </div>`;
@@ -650,10 +519,7 @@ BASE_HTML = r"""
         return;
       }
 
-      // APPEND
-      const html = data.stories.map(storyCard).join('');
-      list.insertAdjacentHTML('beforeend', html);
-
+      list.insertAdjacentHTML('beforeend', data.stories.map(storyCard).join(''));
       btn.dataset.page = String(nextPage);
       status.textContent = '';
     }catch(e){
@@ -672,7 +538,6 @@ BASE_HTML = r"""
 """
 
 
-# ---------------- Routes ----------------
 @app.route("/")
 def home():
     q = request.args.get("q", "").strip()
@@ -682,7 +547,6 @@ def home():
     last_updated_iso = get_latest_update_iso()
     stories = get_recent_stories(limit=PAGE_SIZE_DEFAULT, search=q if q else None, page=page)
     stories = [serialize_story(s) for s in stories]
-    now_year = datetime.now().year
 
     return render_template_string(
         BASE_HTML,
@@ -695,7 +559,7 @@ def home():
         active_topic=None,
         search_action=url_for("home"),
         last_updated_iso=last_updated_iso,
-        now_year=now_year,
+        app_build=APP_BUILD,
     )
 
 
@@ -707,7 +571,6 @@ def topic_page(topic):
     last_updated_iso = get_latest_update_iso()
     stories = get_topic_stories(topic, limit=PAGE_SIZE_DEFAULT, page=page)
     stories = [serialize_story(s) for s in stories]
-    now_year = datetime.now().year
 
     return render_template_string(
         BASE_HTML,
@@ -720,10 +583,9 @@ def topic_page(topic):
         active_topic=topic,
         search_action=url_for("topic_page", topic=topic),
         last_updated_iso=last_updated_iso,
-        now_year=now_year,
+        app_build=APP_BUILD,
     )
 
 
-# ---------------- Entrypoint ----------------
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
