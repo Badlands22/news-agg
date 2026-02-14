@@ -567,16 +567,23 @@ BASE_HTML = r"""
             {% if story['summary'] %}
               {# Safely handle stored "<br>" tokens without rendering raw HTML #}
               <div class="summary">
-                {{
-                  story['summary']
-                    | replace('<br />','\n')
-                    | replace('<br/>','\n')
-                    | replace('<br>','\n')
-                    | e
-                    | replace('\n','<br>')
-                    | safe
-                }}
-              </div>
+  {{
+    (story['summary'] or '')
+      | replace('&lt;br /&gt;','\n')
+      | replace('&lt;br/&gt;','\n')
+      | replace('&lt;br&gt;','\n')
+      | replace('<br />','\n')
+      | replace('<br/>','\n')
+      | replace('<br>','\n')
+      | replace('<BR />','\n')
+      | replace('<BR/>','\n')
+      | replace('<BR>','\n')
+      | e
+      | replace('\n','<br>')
+      | safe
+  }}
+</div>
+
             {% endif %}
 
             <div class="meta">
