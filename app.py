@@ -2,6 +2,7 @@ import os
 import re
 import sqlite3
 import time
+import html
 from datetime import datetime, timezone
 from flask import Flask, render_template_string, request, jsonify, url_for
 
@@ -55,26 +56,41 @@ def normalize_topic_label(topic: str) -> str:
 
 def normalize_summary_for_display(text: str) -> str:
     """
-    Convert ANY <br> variants (and escaped &lt;br&gt;) to newline.
-    Also handle weird spacing like <br > or <br    />.
+    Guaranteed cleanup:
+    - decode HTML entities (even double-escaped)
+    - convert ANY <br ...> variant to newline
+    - strip any remaining HTML tags
+    - return plain text with \n
     """
     if not text:
         return ""
 
     t = str(text)
 
-    # Handle escaped variants first
-    t = t.replace("&lt;br&gt;", "\n").replace("&lt;br/&gt;", "\n").replace("&lt;br /&gt;", "\n")
+    # remove zero-width chars that can break matching
+    t = re.sub(r"[\u200b\u200c\u200d\ufeff]", "", t)
 
-    # Handle ANY <br ...> variant (case-insensitive)
-    t = re.sub(r"(?i)<\s*br\s*/?\s*>", "\n", t)
+    # unescape entities multiple times (handles &lt;br&gt;, &amp;lt;br&amp;gt;, etc.)
+    for _ in range(4):
+        t2 = html.unescape(t)
+        if t2 == t:
+            break
+        t = t2
 
-    # Also handle double-escaped cases (rare): &amp;lt;br&amp;gt;
-    t = t.replace("&amp;lt;br&amp;gt;", "\n").replace("&amp;lt;br/&amp;gt;", "\n").replace("&amp;lt;br /&amp;gt;", "\n")
+    # convert any <br>, <br/>, <br />, <br   />, <BR ...> etc. to newlines
+    t = re.sub(r"(?i)<\s*br\b[^>]*>", "\n", t)
 
-    # Normalize newlines
+    # strip any other HTML tags that might sneak in
+    t = re.sub(r"<[^>]+>", "", t)
+
+    # normalize newlines
     t = t.replace("\r\n", "\n").replace("\r", "\n")
-    return t.strip()
+
+    # trim trailing spaces on lines + collapse insane gaps
+    t = "\n".join(line.rstrip() for line in t.split("\n"))
+    t = re.sub(r"\n{4,}", "\n\n\n", t).strip()
+
+    return t
 
 
 # ---------------- DB helpers ----------------
