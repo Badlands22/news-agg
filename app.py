@@ -17,9 +17,56 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 PAGE_SIZE_DEFAULT = 12
 
-# Small in-process cache to prevent hammering DB during deploy/health checks
+# small in-process cache (helps during deploy/health checks)
 CACHE_TTL_SECONDS = 10
 _cache = {}  # key -> (expires_epoch, value)
+
+
+# ---------------- Topic normalization ----------------
+CANON_TOPIC = {
+    "fbi": "FBI",
+    "ufo": "UFO",
+    "qanon": "QAnon",
+    "rico": "RICO",
+    "executive order": "Executive Order",
+    "conspiracy theory": "Conspiracy Theory",
+    "board of peace": "Board of Peace",
+    "saudi": "Saudi",
+    "iran": "Iran",
+    "israel": "Israel",
+    "trump": "Trump",
+    "putin": "Putin",
+    "russia": "Russia",
+    "china": "China",
+    "court": "Court",
+    "election": "Election",
+    "voter": "Voter",
+    "injunction": "Injunction",
+    "lawsuit": "Lawsuit",
+    "nuclear": "Nuclear",
+    "corruption": "Corruption",
+    "conspiracy": "Conspiracy",
+    "bitcoin": "Bitcoin",
+    "maha": "MAHA",
+    "netanyahu": "Netanyahu",
+    "erdogan": "Erdogan",
+    "lavrov": "Lavrov",
+    "congo": "Congo",
+    "sahel": "Sahel",
+}
+
+
+def normalize_topic_label(topic: str) -> str:
+    t = (topic or "").strip()
+    if not t:
+        return ""
+    key = t.lower()
+    if key in CANON_TOPIC:
+        return CANON_TOPIC[key]
+    # Default: Title Case, but preserve existing all-caps acronyms
+    if t.isupper() and len(t) <= 8:
+        return t
+    return t.title()
 
 
 # ---------------- DB helpers ----------------
@@ -29,12 +76,11 @@ def using_postgres() -> bool:
 
 def pg_connect():
     """
-    Fail fast. Render will kill the service if requests hang.
-    statement_timeout is in ms.
+    Fail-fast. Render will restart the service if gunicorn can't boot.
+    statement_timeout is ms.
     """
     if psycopg is None:
-        raise RuntimeError("psycopg is not installed. Add psycopg[binary] to requirements.txt")
-
+        raise RuntimeError("psycopg not installed. Add psycopg[binary] to requirements.txt")
     conn = psycopg.connect(
         DATABASE_URL,
         connect_timeout=5,
@@ -65,7 +111,6 @@ def _cache_set(key, val, ttl=CACHE_TTL_SECONDS):
 
 
 def fetch_rows(query: str, params: tuple = ()):
-    """Return list[dict] rows for both Postgres and SQLite. Fail-fast on errors."""
     try:
         if using_postgres():
             with pg_connect() as conn:
@@ -157,8 +202,11 @@ def get_recent_stories(limit=12, search=None, page=1):
 
 
 def get_topic_stories(topic, limit=12, page=1):
+    """
+    Case-insensitive match so clicking 'Trump' includes rows where topic is 'trump', 'TRUMP', etc.
+    """
     offset = max(page - 1, 0) * limit
-    cache_key = ("topic", topic.lower(), limit, page, "pg" if using_postgres() else "sqlite")
+    cache_key = ("topic", (topic or "").lower(), limit, page, "pg" if using_postgres() else "sqlite")
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
@@ -214,12 +262,37 @@ def get_latest_update_iso():
 
 
 def get_all_topics():
-    # Keep your full, always-visible topic list
+    # Canonical, pretty labels (these are what your buttons show)
     return [
-        "Bitcoin", "China", "Conspiracy", "Corruption", "Court", "Election", "Executive order",
-        "Fbi", "Iran", "Israel", "Lawsuit", "Nuclear", "Putin", "Russia", "Saudi", "Trump",
-        "Voter", "Injunction", "Rico", "Conspiracy theory", "Qanon", "Ufo", "Maha",
-        "Netanyahu", "Erdogan", "Lavrov", "Board of peace", "Congo", "Sahel"
+        "Bitcoin",
+        "China",
+        "Conspiracy",
+        "Corruption",
+        "Court",
+        "Election",
+        "Executive Order",
+        "FBI",
+        "Iran",
+        "Israel",
+        "Lawsuit",
+        "Nuclear",
+        "Putin",
+        "Russia",
+        "Saudi",
+        "Trump",
+        "Voter",
+        "Injunction",
+        "RICO",
+        "Conspiracy Theory",
+        "QAnon",
+        "UFO",
+        "MAHA",
+        "Netanyahu",
+        "Erdogan",
+        "Lavrov",
+        "Board of Peace",
+        "Congo",
+        "Sahel",
     ]
 
 
@@ -230,16 +303,18 @@ def serialize_story(s):
     elif ts is not None:
         ts = str(ts)
 
+    topic_raw = s.get("topic") or ""
     return {
         "title": s.get("title") or "",
         "link": s.get("link") or "",
-        "topic": s.get("topic") or "",
+        "topic": topic_raw,
+        "topic_label": normalize_topic_label(topic_raw),
         "summary": s.get("summary") or "",
         "added_at": ts or "",
     }
 
 
-# ---------------- Fast health endpoint (NO DB!) ----------------
+# ---------------- Fast health endpoint (NO DB) ----------------
 @app.get("/health")
 def health():
     return "ok", 200
@@ -258,12 +333,14 @@ def api_stories():
     else:
         rows = get_recent_stories(limit=limit, search=q, page=page)
 
-    return jsonify({
-        "page": page,
-        "limit": limit,
-        "count": len(rows),
-        "stories": [serialize_story(r) for r in rows],
-    })
+    return jsonify(
+        {
+            "page": page,
+            "limit": limit,
+            "count": len(rows),
+            "stories": [serialize_story(r) for r in rows],
+        }
+    )
 
 
 BASE_HTML = r"""
@@ -275,60 +352,180 @@ BASE_HTML = r"""
   <title>{{ page_title }}</title>
   <style>
     :root{
-      --bg:#0b0f14; --panel:#101823; --card:#0f1722; --text:#e9eef6; --muted:#9fb0c5;
-      --border:rgba(255,255,255,.10); --red:#ff2a2a; --red2:#d91f1f; --link:#8ab4ff;
+      /* darker, smoother base */
+      --bg:#0a0f16;
+      --panel:#0f1824;
+      --panel2:#0c131d;
+      --card:#0d1621;
+
+      --text:#e7eef7;
+      --muted:#9fb0c5;
+
+      /* higher-contrast pill/button */
+      --pill:#121f2e;
+      --pillBorder:rgba(255,255,255,.16);
+      --pillHover:rgba(255,255,255,.10);
+
+      /* red accent */
+      --red:#ff2a2a;
+      --red2:#d91f1f;
+
+      --link:#8ab4ff;
+      --shadow: 0 12px 40px rgba(0,0,0,.55);
     }
+
     *{box-sizing:border-box}
-    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial;color:var(--text);background:var(--bg);line-height:1.45}
+    body{
+      margin:0;
+      font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial;
+      color:var(--text);
+      background:
+        radial-gradient(1100px 600px at 20% -10%, rgba(255,42,42,.12), transparent 60%),
+        radial-gradient(900px 520px at 80% 0%, rgba(138,180,255,.10), transparent 55%),
+        linear-gradient(180deg, var(--bg), #070b10 60%);
+      line-height:1.45;
+    }
     a{color:var(--link);text-decoration:none}
     a:hover{text-decoration:underline}
-    .wrap{max-width:1040px;margin:0 auto;padding:16px}
+
+    .wrap{max-width:1100px;margin:0 auto;padding:16px}
+
     .top{
-      display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap;
-      padding:14px;border:1px solid var(--border);border-radius:18px;background:linear-gradient(180deg,var(--panel),rgba(16,24,35,.55));
+      border-radius:22px;
+      padding:16px 16px 14px;
+      border:1px solid rgba(255,255,255,.10);
+      background: linear-gradient(180deg, rgba(15,24,36,.92), rgba(12,19,29,.72));
+      box-shadow: var(--shadow);
     }
-    .title{font-size:22px;font-weight:800;margin:0}
-    .sub{margin:4px 0 0;color:var(--muted);font-size:13px}
-    .searchbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .title{font-size:28px;font-weight:900;margin:0;letter-spacing:.2px}
+    .sub{margin:6px 0 0;color:var(--muted);font-size:13px}
+
+    .searchbar{margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
     .searchbar input{
-      width:min(520px,70vw);padding:10px 12px;border-radius:12px;border:1px solid var(--border);
-      background:#0b121c;color:var(--text);outline:none
+      flex:1;
+      min-width:min(520px, 78vw);
+      padding:12px 14px;
+      border-radius:14px;
+      border:1px solid rgba(255,255,255,.14);
+      background: rgba(7,11,16,.75);
+      color:var(--text);
+      outline:none;
+    }
+    .searchbar input:focus{
+      border-color: rgba(138,180,255,.35);
+      box-shadow: 0 0 0 3px rgba(138,180,255,.12);
     }
     .searchbar button{
-      padding:10px 12px;border-radius:12px;border:1px solid rgba(255,42,42,.5);
-      background:linear-gradient(180deg,var(--red),var(--red2));color:white;font-weight:700;cursor:pointer
+      padding:12px 16px;
+      border-radius:14px;
+      border:1px solid rgba(255,42,42,.55);
+      background:linear-gradient(180deg,var(--red),var(--red2));
+      color:white;
+      font-weight:900;
+      cursor:pointer;
+      box-shadow: 0 10px 26px rgba(255,42,42,.18);
     }
-    .pills{margin-top:12px;display:flex;gap:8px;flex-wrap:wrap}
+    .searchbar button:hover{filter:brightness(1.05)}
+    .searchbar button:active{transform:translateY(1px)}
+
+    .pills{margin-top:14px;display:flex;gap:10px;flex-wrap:wrap}
     .pill{
-      display:inline-flex;align-items:center;gap:8px;
-      padding:8px 10px;border-radius:999px;border:1px solid var(--border);background:rgba(255,255,255,.03);
-      color:var(--text);font-size:13px
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      padding:9px 12px;
+      border-radius:999px;
+      border:1px solid var(--pillBorder);
+      background: linear-gradient(180deg, rgba(18,31,46,.95), rgba(10,18,28,.85));
+      color:var(--text);
+      font-size:13px;
+      transition: all .12s ease;
     }
-    .pill.active{border-color:rgba(255,42,42,.75);box-shadow:0 0 0 2px rgba(255,42,42,.15) inset}
+    .pill:hover{
+      background: linear-gradient(180deg, rgba(27,44,63,.95), rgba(12,21,33,.85));
+      border-color: rgba(138,180,255,.22);
+      transform: translateY(-1px);
+    }
+    .pill.active{
+      border-color: rgba(255,42,42,.70);
+      box-shadow: 0 0 0 3px rgba(255,42,42,.12) inset, 0 10px 26px rgba(255,42,42,.12);
+    }
+
     .ad{
-      margin:14px 0;border:1px dashed rgba(255,255,255,.25);border-radius:18px;padding:14px;
-      background:rgba(255,255,255,.03);color:var(--muted);text-align:center
+      margin:16px 0 10px;
+      border:1px dashed rgba(255,255,255,.26);
+      border-radius:18px;
+      padding:14px;
+      background: rgba(255,255,255,.03);
+      color:var(--muted);
+      text-align:center;
     }
+
+    h2{margin:18px 0 10px;font-size:28px}
+
     .cards{margin-top:10px}
     .card{
-      border:1px solid var(--border);border-radius:18px;padding:14px;background:rgba(255,255,255,.02);
-      margin:10px 0
+      border:1px solid rgba(255,255,255,.10);
+      border-radius:22px;
+      padding:16px;
+      background: linear-gradient(180deg, rgba(13,22,33,.82), rgba(10,16,24,.72));
+      box-shadow: 0 16px 44px rgba(0,0,0,.38);
+      margin:14px 0;
     }
-    .card h3{margin:0 0 8px;font-size:16px;line-height:1.25}
-    .summary{margin-top:8px;color:#d7e2f1}
-    .meta{margin-top:10px;color:var(--muted);font-size:12px;display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-    .btnrow{margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    .card h3{margin:0 0 10px;font-size:18px;line-height:1.25}
+    .summary{
+      margin-top:6px;
+      color:#d7e2f1;
+    }
+    .meta{
+      margin-top:12px;
+      color:var(--muted);
+      font-size:12px;
+      display:flex;
+      gap:12px;
+      flex-wrap:wrap;
+      align-items:center;
+    }
+    .topicTag{
+      padding:4px 10px;
+      border-radius:999px;
+      border:1px solid rgba(255,255,255,.14);
+      background: rgba(255,255,255,.04);
+      color:#cfe0f7;
+      font-weight:700;
+      letter-spacing:.2px;
+    }
+
+    .btnrow{margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
     .readbtn{
-      display:inline-flex;align-items:center;gap:8px;
-      padding:10px 12px;border-radius:12px;border:1px solid rgba(255,42,42,.5);
-      background:linear-gradient(180deg,var(--red),var(--red2));color:white;font-weight:800
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      padding:11px 14px;
+      border-radius:14px;
+      border:1px solid rgba(255,42,42,.55);
+      background:linear-gradient(180deg,var(--red),var(--red2));
+      color:white;
+      font-weight:900;
     }
-    .loadwrap{margin:16px 0;display:flex;justify-content:center}
+    .readbtn:hover{filter:brightness(1.05)}
+    .readbtn:active{transform:translateY(1px)}
+
+    .loadwrap{margin:18px 0;display:flex;justify-content:center}
     #loadMore{
-      padding:12px 16px;border-radius:14px;border:1px solid rgba(255,42,42,.55);
-      background:linear-gradient(180deg,var(--red),var(--red2));color:white;font-weight:900;cursor:pointer
+      padding:12px 18px;
+      border-radius:16px;
+      border:1px solid rgba(255,42,42,.55);
+      background:linear-gradient(180deg,var(--red),var(--red2));
+      color:white;
+      font-weight:950;
+      cursor:pointer;
+      box-shadow: 0 14px 34px rgba(255,42,42,.16);
     }
+    #loadMore:hover{filter:brightness(1.05)}
+    #loadMore:active{transform:translateY(1px)}
     #loadStatus{margin-top:10px;text-align:center;color:var(--muted);font-size:12px}
+
     footer{margin:26px 0 10px;color:var(--muted);font-size:12px;text-align:center}
   </style>
 </head>
@@ -348,18 +545,18 @@ BASE_HTML = r"""
         <button type="submit">Search</button>
       </form>
 
-      <div class="pills" style="flex-basis:100%">
+      <div class="pills">
         <a class="pill {% if not active_topic %}active{% endif %}" href="{{ url_for('home') }}">All Topics</a>
         {% for t in topics %}
           <a class="pill {% if active_topic and active_topic|lower == t|lower %}active{% endif %}"
-             href="{{ url_for('topic_page', topic=t) }}">{{ t|capitalize }}</a>
+             href="{{ url_for('topic_page', topic=t) }}">{{ t }}</a>
         {% endfor %}
       </div>
     </div>
 
     <div class="ad">Advertisement / Sponsored Content Placeholder (728×90)</div>
 
-    <h2 style="margin:10px 0 6px;">{{ heading }}</h2>
+    <h2>{{ heading }}</h2>
 
     <div id="stories" class="cards">
       {% if stories %}
@@ -368,11 +565,22 @@ BASE_HTML = r"""
             <h3>{{ story['title'] }}</h3>
 
             {% if story['summary'] %}
-              <div class="summary">{{ story['summary'] | e | replace('\n','<br>') | safe }}</div>
+              {# Safely handle stored "<br>" tokens without rendering raw HTML #}
+              <div class="summary">
+                {{
+                  story['summary']
+                    | replace('<br />','\n')
+                    | replace('<br/>','\n')
+                    | replace('<br>','\n')
+                    | e
+                    | replace('\n','<br>')
+                    | safe
+                }}
+              </div>
             {% endif %}
 
             <div class="meta">
-              <span>{{ (story['topic'] or '') | capitalize }}</span>
+              <span class="topicTag">{{ story['topic_label'] }}</span>
               {% if story['added_at'] %}<span>{{ story['added_at'] }}</span>{% endif %}
             </div>
 
@@ -406,9 +614,20 @@ BASE_HTML = r"""
     }[c]));
   }
 
+  function normalizeSummary(raw){
+    // raw may contain literal <br> tokens from older summaries
+    let s = raw || '';
+    s = s.replace(/<br\s*\/?>/gi, "\n");
+    return s;
+  }
+
   function storyCard(s){
-    const summary = s.summary ? `<div class="summary">${escapeHtml(s.summary).replace(/\\n/g,'<br>')}</div>` : '';
-    const topic = escapeHtml(s.topic || '');
+    const summaryText = normalizeSummary(s.summary || '');
+    const summaryHtml = summaryText
+      ? `<div class="summary">${escapeHtml(summaryText).replace(/\\n/g,'<br>')}</div>`
+      : '';
+
+    const topicLabel = escapeHtml(s.topic_label || s.topic || '');
     const added = escapeHtml(s.added_at || '');
     const title = escapeHtml(s.title || '');
     const link = escapeHtml(s.link || '#');
@@ -416,9 +635,9 @@ BASE_HTML = r"""
     return `
       <div class="card">
         <h3>${title}</h3>
-        ${summary}
+        ${summaryHtml}
         <div class="meta">
-          <span>${topic}</span>
+          <span class="topicTag">${topicLabel}</span>
           ${added ? `<span>${added}</span>` : ``}
         </div>
         <div class="btnrow">
@@ -476,9 +695,11 @@ BASE_HTML = r"""
 def home():
     q = request.args.get("q", "").strip()
     page = max(int(request.args.get("page", "1") or "1"), 1)
+
     topics = get_all_topics()
     last_updated_iso = get_latest_update_iso()
     stories = get_recent_stories(limit=PAGE_SIZE_DEFAULT, search=q if q else None, page=page)
+    stories = [serialize_story(s) for s in stories]
     now_year = datetime.now().year
 
     return render_template_string(
@@ -499,15 +720,17 @@ def home():
 @app.route("/topic/<topic>")
 def topic_page(topic):
     page = max(int(request.args.get("page", "1") or "1"), 1)
+
     topics = get_all_topics()
     last_updated_iso = get_latest_update_iso()
     stories = get_topic_stories(topic, limit=PAGE_SIZE_DEFAULT, page=page)
+    stories = [serialize_story(s) for s in stories]
     now_year = datetime.now().year
 
     return render_template_string(
         BASE_HTML,
-        page_title=f"{topic.capitalize()} - News Aggregator",
-        heading=f"{topic.capitalize()} News",
+        page_title=f"{normalize_topic_label(topic)} - News Aggregator",
+        heading=f"{normalize_topic_label(topic)} News",
         stories=stories,
         topics=topics,
         q="",
