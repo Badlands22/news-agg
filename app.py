@@ -1,7 +1,7 @@
-# From your repo root (or adjust path):
+# 1) Overwrite app.py with the correct Python code
 $path = "app.py"
 
-$txt = @'
+$py = @'
 import os
 import sqlite3
 import time
@@ -20,22 +20,16 @@ DB_PATH = os.getenv("DB_PATH", "news.db")
 DATABASE_URL = os.getenv("DATABASE_URL")
 PAGE_SIZE_DEFAULT = 12
 
-# Small in-process cache to prevent hammering DB during deploy/health checks
+# Small in-process cache
 CACHE_TTL_SECONDS = 10
 _cache = {}  # key -> (expires_epoch, value)
 
-# ---------------- DB helpers ----------------
 def using_postgres() -> bool:
     return bool(DATABASE_URL)
 
 def pg_connect():
-    """
-    Important: fail fast.
-    Render will kill the service if requests hang. statement_timeout is in ms.
-    """
     if psycopg is None:
         raise RuntimeError("psycopg is not installed. Add psycopg[binary] to requirements.txt")
-    # statement_timeout=5000 => any query taking >5s aborts instead of hanging forever
     return psycopg.connect(
         DATABASE_URL,
         connect_timeout=5,
@@ -60,7 +54,6 @@ def _cache_set(key, val, ttl=CACHE_TTL_SECONDS):
     _cache[key] = (time.time() + ttl, val)
 
 def fetch_rows(query: str, params: tuple = ()):
-    """Return list[dict] rows for both Postgres and SQLite. Fail-fast on errors."""
     try:
         if using_postgres():
             with pg_connect() as conn:
@@ -99,7 +92,6 @@ def fetch_one(query: str, params: tuple = ()):
         print(f"[DB] fetch_one error: {e}")
         return None
 
-# ---------------- Queries ----------------
 def get_recent_stories(limit=12, search=None, page=1):
     offset = max(page - 1, 0) * limit
     cache_key = ("recent", limit, search or "", page, "pg" if using_postgres() else "sqlite")
@@ -204,7 +196,6 @@ def get_latest_update_iso():
     return iso
 
 def get_all_topics():
-    # Keep your existing list
     return [
         "Bitcoin","China","Conspiracy","Corruption","Court","Election","Executive order","Fbi","Iran","Israel",
         "Lawsuit","Nuclear","Putin","Russia","Saudi","Trump","Voter","Injunction","Rico","Conspiracy theory",
@@ -212,7 +203,6 @@ def get_all_topics():
     ]
 
 def serialize_story(s):
-    # Normalize added_at to string
     ts = s.get("added_at")
     if isinstance(ts, datetime):
         ts = (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)).astimezone(timezone.utc).isoformat()
@@ -226,12 +216,10 @@ def serialize_story(s):
         "added_at": ts or "",
     }
 
-# ---------------- Fast health endpoint (NO DB!) ----------------
 @app.get("/health")
 def health():
     return "ok", 200
 
-# ---------------- JSON API for append paging ----------------
 @app.get("/api/stories")
 def api_stories():
     q = request.args.get("q", "").strip() or None
@@ -251,9 +239,7 @@ def api_stories():
         "stories": [serialize_story(r) for r in rows],
     })
 
-# ---------------- Routes ----------------
-BASE_HTML = """
-<!doctype html>
+BASE_HTML = """<!doctype html>
 <html>
 <head>
   <meta charset="utf-8" />
@@ -338,13 +324,6 @@ BASE_HTML = """
     <div class="center" style="margin-top: 14px;">
       <button id="loadMore" data-page="{{ page }}" data-topic="{{ topic or '' }}" data-q="{{ q }}">Load more</button>
       <div id="loadStatus" class="muted" style="margin-top:8px;"></div>
-      <noscript>
-        <div class="muted" style="margin-top:10px;">
-          JavaScript is off — use paging:
-          {% if page > 1 %}<a href="{{ page_url(page-1) }}">Newer</a>{% endif %}
-          <a href="{{ page_url(page+1) }}">Older</a>
-        </div>
-      </noscript>
     </div>
 
     <div class="footer">© {{ now_year }} News Aggregator</div>
@@ -423,13 +402,6 @@ def home():
     stories = get_recent_stories(limit=PAGE_SIZE_DEFAULT, search=q if q else None, page=page)
     now_year = datetime.now().year
 
-    def page_url(p):
-        args = {}
-        if q:
-            args["q"] = q
-        args["page"] = p
-        return url_for("home", **args)
-
     return render_template_string(
         BASE_HTML,
         page_title="News Aggregator",
@@ -442,7 +414,6 @@ def home():
         search_action=url_for("home"),
         last_updated_iso=last_updated_iso,
         now_year=now_year,
-        page_url=page_url,
     )
 
 @app.route("/topic/<topic>")
@@ -452,9 +423,6 @@ def topic_page(topic):
     last_updated_iso = get_latest_update_iso()
     stories = get_topic_stories(topic, limit=PAGE_SIZE_DEFAULT, page=page)
     now_year = datetime.now().year
-
-    def page_url(p):
-        return url_for("topic_page", topic=topic, page=p)
 
     return render_template_string(
         BASE_HTML,
@@ -468,12 +436,11 @@ def topic_page(topic):
         search_action=url_for("topic_page", topic=topic),
         last_updated_iso=last_updated_iso,
         now_year=now_year,
-        page_url=page_url,
     )
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
 '@
 
-Set-Content -Path $path -Value $txt -Encoding utf8
-"OK: updated app.py (append load more + styling + api)"
+Set-Content -Path $path -Value $py -Encoding utf8
+"OK: app.py overwritten with Python (no PowerShell inside)"
