@@ -163,7 +163,7 @@ def get_recent_stories(limit=12, search=None, page=1):
 def get_topic_stories(topic, limit=12, page=1):
     offset = max(page - 1, 0) * limit
 
-    cache_key = ("topic", topic, limit, page, "pg" if using_postgres() else "sqlite")
+    cache_key = ("topic", topic.lower(), limit, page, "pg" if using_postgres() else "sqlite")
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
@@ -172,7 +172,7 @@ def get_topic_stories(topic, limit=12, page=1):
         q = """
             SELECT title, link, topic, summary, added_at
             FROM public.articles
-            WHERE topic = %s
+            WHERE lower(topic) = lower(%s)
             ORDER BY added_at DESC
             LIMIT %s OFFSET %s
         """
@@ -181,7 +181,7 @@ def get_topic_stories(topic, limit=12, page=1):
         q = """
             SELECT title, link, topic, summary, added_at
             FROM articles
-            WHERE topic = ?
+            WHERE lower(topic) = lower(?)
             ORDER BY added_at DESC
             LIMIT ? OFFSET ?
         """
@@ -189,6 +189,7 @@ def get_topic_stories(topic, limit=12, page=1):
 
     _cache_set(cache_key, rows)
     return rows
+
 
 
 def get_latest_update_iso():
