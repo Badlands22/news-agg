@@ -1,53 +1,61 @@
 from flask import Flask, render_template_string, request
-import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
+import os
+
+# Postgres driver
+import psycopg
+from psycopg.rows import dict_row
 
 app = Flask(__name__)
 
-DB_PATH = "news.db"
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+
+def pg_connect():
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL is not set in this service (news-agg).")
+    # Render Postgres URLs work directly with psycopg
+    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
+
 
 def get_recent_stories(limit=12, search=None):
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    if search:
-        query = """
-            SELECT title, link, topic, summary, added_at
-            FROM articles
-            WHERE title LIKE ? OR topic LIKE ? OR summary LIKE ?
-            ORDER BY added_at DESC
-            LIMIT ?
-        """
-        term = f"%{search}%"
-        c.execute(query, (term, term, term, limit))
-    else:
-        c.execute("""
-            SELECT title, link, topic, summary, added_at
-            FROM articles
-            ORDER BY added_at DESC
-            LIMIT ?
-        """, (limit,))
-    rows = c.fetchall()
-    conn.close()
-    return rows
+    with pg_connect() as conn:
+        with conn.cursor() as c:
+            if search:
+                query = """
+                    SELECT title, link, topic, summary, added_at
+                    FROM public.articles
+                    WHERE title ILIKE %s OR topic ILIKE %s OR COALESCE(summary,'') ILIKE %s
+                    ORDER BY added_at DESC
+                    LIMIT %s
+                """
+                term = f"%{search}%"
+                c.execute(query, (term, term, term, limit))
+            else:
+                c.execute("""
+                    SELECT title, link, topic, summary, added_at
+                    FROM public.articles
+                    ORDER BY added_at DESC
+                    LIMIT %s
+                """, (limit,))
+            return c.fetchall()
+
 
 def get_topic_stories(topic, limit=12):
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    c.execute("""
-        SELECT title, link, topic, summary, added_at
-        FROM articles
-        WHERE topic = ?
-        ORDER BY added_at DESC
-        LIMIT ?
-    """, (topic, limit))
-    rows = c.fetchall()
-    conn.close()
-    return rows
+    with pg_connect() as conn:
+        with conn.cursor() as c:
+            c.execute("""
+                SELECT title, link, topic, summary, added_at
+                FROM public.articles
+                WHERE topic = %s
+                ORDER BY added_at DESC
+                LIMIT %s
+            """, (topic, limit))
+            return c.fetchall()
+
 
 def get_all_topics():
-    # Hardcoded full list so all topics always show
+    # Keep your hardcoded topic list exactly as-is
     return [
         "All Topics", "Bitcoin", "China", "Conspiracy", "Corruption", "Court", "Election",
         "Executive order", "Fbi", "Iran", "Israel", "Lawsuit", "Nuclear",
@@ -56,15 +64,23 @@ def get_all_topics():
         "Netanyahu", "Erdogan", "Lavrov", "Board of Peace", "Congo", "Sahel"
     ]
 
+
 def get_latest_update():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT MAX(added_at) FROM articles")
-    result = c.fetchone()[0]
-    conn.close()
-    if result:
-        return datetime.fromisoformat(result).strftime("%Y-%m-%d %H:%M UTC")
-    return "Never"
+    with pg_connect() as conn:
+        with conn.cursor() as c:
+            c.execute("SELECT MAX(added_at) FROM public.articles;")
+            result = c.fetchone()
+            if not result:
+                return "Never"
+
+            ts = result["max"]  # dict_row gives column name "max"
+            if ts:
+                # ts is already a datetime from Postgres
+                # Display in UTC like your original
+                ts_utc = ts.astimezone(timezone.utc)
+                return ts_utc.strftime("%Y-%m-%d %H:%M UTC")
+            return "Never"
+
 
 @app.route('/')
 def home():
@@ -72,6 +88,7 @@ def home():
     stories = get_recent_stories(12, search if search else None)
     topics = get_all_topics()
     last_updated = get_latest_update()
+
     html = """
     <!DOCTYPE html>
     <html lang="en" class="dark">
@@ -120,13 +137,13 @@ def home():
         <!-- Search Bar -->
         <div class="container mx-auto px-6 py-6">
             <form method="GET" class="max-w-3xl mx-auto">
-                <input type="text" name="q" value="{{ request.args.get('q', '') }}" 
-                       placeholder="Search titles or topics..." 
+                <input type="text" name="q" value="{{ request.args.get('q', '') }}"
+                       placeholder="Search titles or topics..."
                        class="w-full bg-gray-900 border border-gray-700 rounded-2xl px-6 py-4 text-lg focus:outline-none focus:border-blue-500">
             </form>
         </div>
 
-        <!-- Ad Banner (static, right below search bar, part of page flow) -->
+        <!-- Ad Banner -->
         <div class="container mx-auto px-6 pb-6">
             <div class="max-w-3xl mx-auto mb-8 bg-gray-900 rounded-2xl p-6 text-center text-gray-500 border border-gray-800">
                 <p>Advertisement / Sponsored Content Placeholder</p>
@@ -145,16 +162,18 @@ def home():
                         <h3 class="text-xl font-semibold mb-4">{{ story['title'] }}</h3>
                         {% if story['summary'] %}
                         <div class="text-gray-400 text-sm whitespace-pre-line leading-relaxed mb-6">
-                            {{ story['summary'] | replace('\n', '<br>') | safe }}
+                            {{ story['summary'] | replace('\\n', '<br>') | safe }}
                         </div>
                         {% endif %}
                         <div class="flex items-center justify-between">
                             <span class="bg-blue-900 text-blue-300 px-4 py-1 rounded-full text-xs font-medium">
                                 {{ story['topic'] | capitalize }}
                             </span>
-                            <span class="text-gray-500 text-sm">{{ story['added_at'][:10] }}</span>
+                            <span class="text-gray-500 text-sm">
+                                {{ story['added_at'].strftime('%Y-%m-%d') if story['added_at'] else '' }}
+                            </span>
                         </div>
-                        <a href="{{ story['link'] }}" target="_blank" 
+                        <a href="{{ story['link'] }}" target="_blank"
                            class="mt-6 block text-center bg-red-600 hover:bg-red-500 transition py-3 rounded-xl font-medium">
                             Read Original →
                         </a>
@@ -175,6 +194,7 @@ def home():
     """
     now_year = datetime.now().year
     return render_template_string(html, stories=stories, topics=topics, last_updated=last_updated, now_year=now_year)
+
 
 @app.route('/topic/<topic>')
 def topic_page(topic):
@@ -226,16 +246,18 @@ def topic_page(topic):
                         <h3 class="text-xl font-semibold mb-4">{{ story['title'] }}</h3>
                         {% if story['summary'] %}
                         <div class="text-gray-400 text-sm whitespace-pre-line leading-relaxed mb-6">
-                            {{ story['summary'] | replace('\n', '<br>') | safe }}
+                            {{ story['summary'] | replace('\\n', '<br>') | safe }}
                         </div>
                         {% endif %}
                         <div class="flex items-center justify-between">
                             <span class="bg-blue-900 text-blue-300 px-4 py-1 rounded-full text-xs font-medium">
                                 {{ story['topic'] | capitalize }}
                             </span>
-                            <span class="text-gray-500 text-sm">{{ story['added_at'][:10] }}</span>
+                            <span class="text-gray-500 text-sm">
+                                {{ story['added_at'].strftime('%Y-%m-%d') if story['added_at'] else '' }}
+                            </span>
                         </div>
-                        <a href="{{ story['link'] }}" target="_blank" 
+                        <a href="{{ story['link'] }}" target="_blank"
                            class="mt-6 block text-center bg-red-600 hover:bg-red-500 transition py-3 rounded-xl font-medium">
                             Read Original →
                         </a>
@@ -253,6 +275,7 @@ def topic_page(topic):
     """
     now_year = datetime.now().year
     return render_template_string(html, stories=stories, topics=topics, topic=topic, last_updated=last_updated, now_year=now_year)
+
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
