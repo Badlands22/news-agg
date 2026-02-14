@@ -253,22 +253,33 @@ def make_fingerprint(title: str, topic_key: str) -> str:
 def sanitize_summary(text: str) -> str:
     """
     Make summaries safe + consistent:
-    - convert <br> tags to newlines
+    - convert <br> tags (and escaped variants) to newlines
     - strip any stray HTML tags
     - normalize whitespace but KEEP newlines
     """
     if not text:
         return ""
     t = text.strip()
+
+    # handle escaped <br> variants first
+    t = t.replace("&lt;br&gt;", "\n").replace("&lt;br/&gt;", "\n").replace("&lt;br /&gt;", "\n")
+
+    # handle real <br> tags (any case, any spacing)
     t = re.sub(r"(?i)<br\s*/?>", "\n", t)
-    t = re.sub(r"<[^>]+>", "", t)  # remove any other HTML tags
+
+    # remove any other HTML tags
+    t = re.sub(r"<[^>]+>", "", t)
+
     # normalize line endings
     t = t.replace("\r\n", "\n").replace("\r", "\n")
+
     # trim trailing spaces per line
     t = "\n".join(line.rstrip() for line in t.split("\n"))
-    # collapse huge blank gaps
+
+    # collapse excessive blank lines
     t = re.sub(r"\n{4,}", "\n\n\n", t).strip()
     return t
+
 
 
 def insert_stub(title: str, link: str, desc: str, pub_date: str, topic_label: str, fingerprint: str):
