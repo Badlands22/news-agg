@@ -5,27 +5,19 @@ import time
 import html
 from datetime import datetime, timezone
 from flask import Flask, render_template_string, request, jsonify, url_for
-
 # Postgres (Render) - psycopg v3
 try:
-    import psycopg  # type: ignore
+    import psycopg # type: ignore
 except Exception:
     psycopg = None
-
 app = Flask(__name__)
-
 # ✅ stamp so we can verify the live code instantly
 APP_BUILD = "brfix-2026-02-14-2"
-
 DB_PATH = os.getenv("DB_PATH", "news.db")
 DATABASE_URL = os.getenv("DATABASE_URL")
-
 PAGE_SIZE_DEFAULT = 12
-
 CACHE_TTL_SECONDS = 10
-_cache = {}  # key -> (expires_epoch, value)
-
-
+_cache = {} # key -> (expires_epoch, value)
 # ---------------- Topic normalization ----------------
 CANON_TOPIC = {
     "fbi": "FBI",
@@ -40,8 +32,6 @@ CANON_TOPIC = {
     "maha": "MAHA",
     "dni": "DNI",
 }
-
-
 def normalize_topic_label(topic: str) -> str:
     t = (topic or "").strip()
     if not t:
@@ -52,8 +42,6 @@ def normalize_topic_label(topic: str) -> str:
     if t.isupper() and len(t) <= 8:
         return t
     return t.title()
-
-
 def normalize_summary_for_display(text: str) -> str:
     """
     Bulletproof cleanup:
@@ -66,48 +54,33 @@ def normalize_summary_for_display(text: str) -> str:
     """
     if not text:
         return ""
-
     t = str(text)
-
     # Remove zero-width chars / BOM / word-joiners that can defeat regex matching
     t = re.sub(r"[\u200b\u200c\u200d\u2060\ufeff]", "", t)
-
     # Strip a leading "Summary:" label (your DB entries clearly include this)
     t = re.sub(r"(?i)^\s*summary\s*:\s*", "", t)
-
     # Unescape multiple times (handles &lt;br&gt;, &amp;lt;br&amp;gt;, etc.)
     for _ in range(8):
         t2 = html.unescape(t)
         if t2 == t:
             break
         t = t2
-
     # Fast-path replacements (handles common cases even if regex somehow misses)
     t = t.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
     t = t.replace("<BR>", "\n").replace("<BR/>", "\n").replace("<BR />", "\n")
-
     # Regex for ANY <br ...> variant, with optional attributes/spaces
     t = re.sub(r"(?is)<\s*br\b[^>]*>", "\n", t)
-
     # Strip any remaining HTML tags
     t = re.sub(r"(?is)<[^>]+>", "", t)
-
     # Normalize newlines
     t = t.replace("\r\n", "\n").replace("\r", "\n")
-
     # Clean up spacing
     t = "\n".join(line.rstrip() for line in t.split("\n"))
     t = re.sub(r"\n{4,}", "\n\n\n", t).strip()
-
     return t
-
-
-
 # ---------------- DB helpers ----------------
 def using_postgres() -> bool:
     return bool(DATABASE_URL)
-
-
 def pg_connect():
     if psycopg is None:
         raise RuntimeError("psycopg not installed. Add psycopg[binary] to requirements.txt")
@@ -119,12 +92,8 @@ def pg_connect():
     )
     conn.autocommit = True
     return conn
-
-
 def sqlite_connect():
     return sqlite3.connect(DB_PATH)
-
-
 def _cache_get(key):
     item = _cache.get(key)
     if not item:
@@ -134,12 +103,8 @@ def _cache_get(key):
         _cache.pop(key, None)
         return None
     return val
-
-
 def _cache_set(key, val, ttl=CACHE_TTL_SECONDS):
     _cache[key] = (time.time() + ttl, val)
-
-
 def fetch_rows(query: str, params: tuple = ()):
     try:
         if using_postgres():
@@ -159,8 +124,6 @@ def fetch_rows(query: str, params: tuple = ()):
     except Exception as e:
         print(f"[DB] fetch_rows error: {e}")
         return []
-
-
 def fetch_one(query: str, params: tuple = ()):
     try:
         if using_postgres():
@@ -179,8 +142,6 @@ def fetch_one(query: str, params: tuple = ()):
     except Exception as e:
         print(f"[DB] fetch_one error: {e}")
         return None
-
-
 # ---------------- Queries ----------------
 def get_recent_stories(limit=12, search=None, page=1):
     offset = max(page - 1, 0) * limit
@@ -188,7 +149,6 @@ def get_recent_stories(limit=12, search=None, page=1):
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
-
     if search:
         term = f"%{search}%"
         if using_postgres():
@@ -226,18 +186,14 @@ def get_recent_stories(limit=12, search=None, page=1):
                 LIMIT ? OFFSET ?
             """
             rows = fetch_rows(q, (limit, offset))
-
     _cache_set(cache_key, rows)
     return rows
-
-
 def get_topic_stories(topic, limit=12, page=1):
     offset = max(page - 1, 0) * limit
     cache_key = ("topic", (topic or "").lower(), limit, page, "pg" if using_postgres() else "sqlite")
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
-
     if using_postgres():
         q = """
             SELECT title, link, topic, summary, added_at
@@ -256,23 +212,18 @@ def get_topic_stories(topic, limit=12, page=1):
             LIMIT ? OFFSET ?
         """
         rows = fetch_rows(q, (topic, limit, offset))
-
     _cache_set(cache_key, rows)
     return rows
-
-
 def get_latest_update_iso():
     cache_key = ("latest_update", "pg" if using_postgres() else "sqlite")
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
-
     q = "SELECT MAX(added_at) FROM public.articles" if using_postgres() else "SELECT MAX(added_at) FROM articles"
     val = fetch_one(q)
     if not val:
         _cache_set(cache_key, None)
         return None
-
     if isinstance(val, datetime):
         dt = val if val.tzinfo else val.replace(tzinfo=timezone.utc)
         iso = dt.astimezone(timezone.utc).isoformat()
@@ -283,11 +234,8 @@ def get_latest_update_iso():
             iso = dt.astimezone(timezone.utc).isoformat()
         except Exception:
             iso = None
-
     _cache_set(cache_key, iso)
     return iso
-
-
 def get_all_topics():
     return [
         "Bitcoin", "China", "Conspiracy", "Corruption", "Court", "Election", "Executive Order",
@@ -295,18 +243,14 @@ def get_all_topics():
         "Voter", "Injunction", "RICO", "Conspiracy Theory", "QAnon", "UFO", "MAHA",
         "Netanyahu", "Erdogan", "Lavrov", "Board of Peace", "Congo", "Sahel",
     ]
-
-
 def serialize_story(s):
     ts = s.get("added_at")
     if isinstance(ts, datetime):
         ts = (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)).astimezone(timezone.utc).isoformat()
     elif ts is not None:
         ts = str(ts)
-
     topic_raw = s.get("topic") or ""
     summary_raw = s.get("summary") or ""
-
     return {
         "title": s.get("title") or "",
         "link": s.get("link") or "",
@@ -315,34 +259,24 @@ def serialize_story(s):
         "summary": normalize_summary_for_display(summary_raw),
         "added_at": ts or "",
     }
-
-
 # ---------------- Routes ----------------
 @app.get("/health")
 def health():
     return "ok", 200
-
-
 @app.get("/version")
 def version():
     return {"app_build": APP_BUILD, "utc": datetime.now(timezone.utc).isoformat()}
-
-
 @app.get("/api/stories")
 def api_stories():
     q = request.args.get("q", "").strip() or None
     topic = request.args.get("topic", "").strip() or None
     page = max(int(request.args.get("page", "1") or "1"), 1)
     limit = max(int(request.args.get("limit", str(PAGE_SIZE_DEFAULT)) or PAGE_SIZE_DEFAULT), 1)
-
     if topic:
         rows = get_topic_stories(topic, limit=limit, page=page)
     else:
-        rows = get_recent_stories(limit=limit, search=q, page=page)
-
+        rows = get_recent_stories(limit=limit, search=q if q else None, page=page)
     return jsonify({"page": page, "limit": limit, "count": len(rows), "stories": [serialize_story(r) for r in rows]})
-
-
 BASE_HTML = r"""
 <!doctype html>
 <html lang="en">
@@ -444,12 +378,10 @@ BASE_HTML = r"""
         {% if last_updated_iso %} • Last updated: {{ last_updated_iso }}{% endif %}
         • Build: {{ app_build }}
       </div>
-
       <form class="searchbar" method="get" action="{{ search_action }}">
         <input name="q" placeholder="Search titles, topics, summaries…" value="{{ q }}" />
         <button type="submit">Search</button>
       </form>
-
       <div class="pills">
         <a class="pill {% if not active_topic %}active{% endif %}" href="{{ url_for('home') }}">All Topics</a>
         {% for t in topics %}
@@ -458,17 +390,14 @@ BASE_HTML = r"""
         {% endfor %}
       </div>
     </div>
-
     <div class="ad">Advertisement / Sponsored Content Placeholder (728×90)</div>
-
     <h2>{{ heading }}</h2>
-
     <div id="stories">
       {% for story in stories %}
         <div class="card">
           <h3>{{ story['title'] }}</h3>
           {% if story['summary'] %}
-            <div class="summary">{{ story['summary'] | e | replace('\n','<br>') | safe }}</div>
+            <div class="summary" style="white-space: pre-line;">{{ story['summary'] | e }}</div>
           {% endif %}
           <div class="meta">
             <span class="topicTag">{{ story['topic_label'] }}</span>
@@ -480,35 +409,30 @@ BASE_HTML = r"""
         </div>
       {% endfor %}
     </div>
-
     <div class="loadwrap">
       <button id="loadMore" data-page="{{ page }}" data-topic="{{ active_topic or '' }}" data-q="{{ q }}">Load more</button>
     </div>
     <div id="loadStatus"></div>
   </div>
-
 <script>
 (function(){
   const btn = document.getElementById('loadMore');
   const status = document.getElementById('loadStatus');
   const list = document.getElementById('stories');
-
   function escapeHtml(s){
     return (s || '').replace(/[&<>"']/g, c => ({
       '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
     }[c]));
   }
-
   function storyCard(s){
     const summaryText = (s.summary || '');
     const summaryHtml = summaryText
-      ? `<div class="summary">${escapeHtml(summaryText).replace(/\\n/g,'<br>')}</div>`
+      ? `<div class="summary" style="white-space: pre-line;">${escapeHtml(summaryText)}</div>`
       : '';
     const topicLabel = escapeHtml(s.topic_label || s.topic || '');
     const added = escapeHtml(s.added_at || '');
     const title = escapeHtml(s.title || '');
     const link = escapeHtml(s.link || '#');
-
     return `
       <div class="card">
         <h3>${title}</h3>
@@ -522,29 +446,23 @@ BASE_HTML = r"""
         </div>
       </div>`;
   }
-
   async function loadNext(){
     const nextPage = (parseInt(btn.dataset.page || '1', 10) + 1);
     const q = btn.dataset.q || '';
     const topic = btn.dataset.topic || '';
-
     const params = new URLSearchParams({ page: String(nextPage) });
     if(q) params.set('q', q);
     if(topic) params.set('topic', topic);
-
     btn.disabled = true;
     status.textContent = 'Loading…';
-
     try{
       const res = await fetch('/api/stories?' + params.toString(), { headers: { 'Accept':'application/json' }});
       const data = await res.json();
-
       if(!data.stories || data.stories.length === 0){
         status.textContent = 'No more stories.';
         btn.style.display = 'none';
         return;
       }
-
       list.insertAdjacentHTML('beforeend', data.stories.map(storyCard).join(''));
       btn.dataset.page = String(nextPage);
       status.textContent = '';
@@ -555,25 +473,20 @@ BASE_HTML = r"""
       btn.disabled = false;
     }
   }
-
   btn.addEventListener('click', loadNext);
 })();
 </script>
 </body>
 </html>
 """
-
-
 @app.route("/")
 def home():
     q = request.args.get("q", "").strip()
     page = max(int(request.args.get("page", "1") or "1"), 1)
-
     topics = get_all_topics()
     last_updated_iso = get_latest_update_iso()
     stories = get_recent_stories(limit=PAGE_SIZE_DEFAULT, search=q if q else None, page=page)
     stories = [serialize_story(s) for s in stories]
-
     return render_template_string(
         BASE_HTML,
         page_title="News Aggregator",
@@ -587,17 +500,13 @@ def home():
         last_updated_iso=last_updated_iso,
         app_build=APP_BUILD,
     )
-
-
 @app.route("/topic/<topic>")
 def topic_page(topic):
     page = max(int(request.args.get("page", "1") or "1"), 1)
-
     topics = get_all_topics()
     last_updated_iso = get_latest_update_iso()
     stories = get_topic_stories(topic, limit=PAGE_SIZE_DEFAULT, page=page)
     stories = [serialize_story(s) for s in stories]
-
     return render_template_string(
         BASE_HTML,
         page_title=f"{normalize_topic_label(topic)} - News Aggregator",
@@ -611,7 +520,5 @@ def topic_page(topic):
         last_updated_iso=last_updated_iso,
         app_build=APP_BUILD,
     )
-
-
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
