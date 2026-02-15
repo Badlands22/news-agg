@@ -13,6 +13,8 @@ readability-lxml
 
 newspaper3k
 
+pytz
+
 
 
 
