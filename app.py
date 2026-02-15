@@ -4,6 +4,7 @@ import sqlite3
 import time
 import html
 from datetime import datetime, timezone
+import pytz
 from flask import Flask, render_template_string, request, jsonify, url_for
 # Postgres (Render) - psycopg v3
 try:
@@ -261,15 +262,20 @@ def serialize_story(s):
             # Nice format: e.g., "Feb 15, 2026 8:35 AM CST"
             local_str = dt_local.strftime("%b %d, %Y %I:%M %p %Z")
         else:
-            local_str = ""
+            local_str = str(ts)  # fallback
     else:
         local_str = ""
     
-    # ... rest of the function unchanged ...
+    topic_raw = s.get("topic") or ""
+    summary_raw = s.get("summary") or ""
+    
     return {
-        # ...
+        "title": s.get("title") or "",
+        "link": s.get("link") or "",
+        "topic": topic_raw,
+        "topic_label": normalize_topic_label(topic_raw),
+        "summary": normalize_summary_for_display(summary_raw),
         "added_at": local_str,
-        # ...
     }
 # ---------------- Routes ----------------
 @app.get("/health")
