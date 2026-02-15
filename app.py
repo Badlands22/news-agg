@@ -56,41 +56,51 @@ def normalize_topic_label(topic: str) -> str:
 
 def normalize_summary_for_display(text: str) -> str:
     """
-    Guaranteed cleanup:
-    - decode HTML entities (even double-escaped)
-    - convert ANY <br ...> variant to newline
-    - strip any remaining HTML tags
-    - return plain text with \n
+    Bulletproof cleanup:
+    - strips leading "Summary:" if present
+    - repeatedly unescapes HTML entities (handles double/triple escaped)
+    - removes zero-width chars (more complete set)
+    - converts ANY <br ...> variant (including weird spacing/attrs) to newline
+    - also catches the literal text "<br>" even if it has hidden chars in it
+    - strips any remaining HTML tags
     """
     if not text:
         return ""
 
     t = str(text)
 
-    # remove zero-width chars that can break matching
-    t = re.sub(r"[\u200b\u200c\u200d\ufeff]", "", t)
+    # Remove zero-width chars / BOM / word-joiners that can defeat regex matching
+    t = re.sub(r"[\u200b\u200c\u200d\u2060\ufeff]", "", t)
 
-    # unescape entities multiple times (handles &lt;br&gt;, &amp;lt;br&amp;gt;, etc.)
-    for _ in range(4):
+    # Strip a leading "Summary:" label (your DB entries clearly include this)
+    t = re.sub(r"(?i)^\s*summary\s*:\s*", "", t)
+
+    # Unescape multiple times (handles &lt;br&gt;, &amp;lt;br&amp;gt;, etc.)
+    for _ in range(8):
         t2 = html.unescape(t)
         if t2 == t:
             break
         t = t2
 
-    # convert any <br>, <br/>, <br />, <br   />, <BR ...> etc. to newlines
-    t = re.sub(r"(?i)<\s*br\b[^>]*>", "\n", t)
+    # Fast-path replacements (handles common cases even if regex somehow misses)
+    t = t.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
+    t = t.replace("<BR>", "\n").replace("<BR/>", "\n").replace("<BR />", "\n")
 
-    # strip any other HTML tags that might sneak in
-    t = re.sub(r"<[^>]+>", "", t)
+    # Regex for ANY <br ...> variant, with optional attributes/spaces
+    t = re.sub(r"(?is)<\s*br\b[^>]*>", "\n", t)
 
-    # normalize newlines
+    # Strip any remaining HTML tags
+    t = re.sub(r"(?is)<[^>]+>", "", t)
+
+    # Normalize newlines
     t = t.replace("\r\n", "\n").replace("\r", "\n")
 
-    # trim trailing spaces on lines + collapse insane gaps
+    # Clean up spacing
     t = "\n".join(line.rstrip() for line in t.split("\n"))
     t = re.sub(r"\n{4,}", "\n\n\n", t).strip()
 
     return t
+
 
 
 # ---------------- DB helpers ----------------
