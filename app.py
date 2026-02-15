@@ -215,7 +215,7 @@ def get_topic_stories(topic, limit=12, page=1):
         rows = fetch_rows(q, (topic, limit, offset))
     _cache_set(cache_key, rows)
     return rows
-def get_latest_update_iso():
+def get_latest_update():
     cache_key = ("latest_update", "pg" if using_postgres() else "sqlite")
     cached = _cache_get(cache_key)
     if cached is not None:
@@ -223,20 +223,20 @@ def get_latest_update_iso():
     q = "SELECT MAX(added_at) FROM public.articles" if using_postgres() else "SELECT MAX(added_at) FROM articles"
     val = fetch_one(q)
     if not val:
-        _cache_set(cache_key, None)
-        return None
-    if isinstance(val, datetime):
-        dt = val if val.tzinfo else val.replace(tzinfo=timezone.utc)
-        iso = dt.astimezone(timezone.utc).isoformat()
+        result = "Never"
     else:
-        try:
-            dt = datetime.fromisoformat(str(val).replace("Z", "+00:00"))
-            dt = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-            iso = dt.astimezone(timezone.utc).isoformat()
-        except Exception:
-            iso = None
-    _cache_set(cache_key, iso)
-    return iso
+        # Ensure clean UTC ISO string
+        if isinstance(val, datetime):
+            dt = val if val.tzinfo else val.replace(tzinfo=timezone.utc)
+            result = dt.isoformat()
+        else:
+            try:
+                dt = datetime.fromisoformat(str(val).replace("Z", "+00:00"))
+                result = dt.isoformat()
+            except:
+                result = str(val)
+    _cache_set(cache_key, result)
+    return result
 def get_all_topics():
     return [
         "Bitcoin", "China", "Conspiracy", "Corruption", "Court", "Election", "Executive Order",
@@ -393,7 +393,9 @@ BASE_HTML = r"""
       <h1 class="title">News Aggregator</h1>
       <div class="sub">
         Real-time updates on your tracked topics
-        {% if last_updated_iso %} • Last updated: {{ last_updated_iso }}{% endif %}
+        {% if last_updated and last_updated != "Never" %}
+          • Last updated: <span id="last-updated" data-utc="{{ last_updated }}"></span>
+        {% endif %}
         • Build: {{ app_build }}
       </div>
       <form class="searchbar" method="get" action="{{ search_action }}">
@@ -492,6 +494,32 @@ BASE_HTML = r"""
     }
   }
   btn.addEventListener('click', loadNext);
+
+  // Format last updated in visitor's local time
+  const lastUpdatedSpan = document.getElementById('last-updated');
+  if (lastUpdatedSpan) {
+    const utcStr = lastUpdatedSpan.getAttribute('data-utc');
+    if (utcStr && utcStr !== 'Never') {
+      try {
+        const date = new Date(utcStr);
+        if (!isNaN(date.getTime())) {
+          const options = {
+            year: 'numeric',
+            month: 'short',
+            day: 'numeric',
+            hour: 'numeric',
+            minute: '2-digit',
+            hour12: true
+          };
+          lastUpdatedSpan.textContent = date.toLocaleString(undefined, options);
+        } else {
+          lastUpdatedSpan.textContent = utcStr;
+        }
+      } catch (e) {
+        lastUpdatedSpan.textContent = utcStr;
+      }
+    }
+  }
 })();
 </script>
 </body>
@@ -502,7 +530,7 @@ def home():
     q = request.args.get("q", "").strip()
     page = max(int(request.args.get("page", "1") or "1"), 1)
     topics = get_all_topics()
-    last_updated_iso = get_latest_update_iso()
+    last_updated = get_latest_update()
     stories = get_recent_stories(limit=PAGE_SIZE_DEFAULT, search=q if q else None, page=page)
     stories = [serialize_story(s) for s in stories]
     return render_template_string(
@@ -515,14 +543,14 @@ def home():
         page=page,
         active_topic=None,
         search_action=url_for("home"),
-        last_updated_iso=last_updated_iso,
+        last_updated=last_updated,
         app_build=APP_BUILD,
     )
 @app.route("/topic/<topic>")
 def topic_page(topic):
     page = max(int(request.args.get("page", "1") or "1"), 1)
     topics = get_all_topics()
-    last_updated_iso = get_latest_update_iso()
+    last_updated = get_latest_update()
     stories = get_topic_stories(topic, limit=PAGE_SIZE_DEFAULT, page=page)
     stories = [serialize_story(s) for s in stories]
     return render_template_string(
@@ -535,7 +563,7 @@ def topic_page(topic):
         page=page,
         active_topic=topic,
         search_action=url_for("topic_page", topic=topic),
-        last_updated_iso=last_updated_iso,
+        last_updated=last_updated,
         app_build=APP_BUILD,
     )
 if __name__ == "__main__":
