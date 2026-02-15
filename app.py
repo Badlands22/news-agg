@@ -303,11 +303,27 @@ BASE_HTML = r"""
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>{{ page_title }}</title>
   <style>
-    :root{
-      --bg:#0a0f16; --text:#e7eef7; --muted:#9fb0c5;
-      --pillBorder:rgba(255,255,255,.16);
-      --red:#ff2a2a; --red2:#d91f1f;
-      --link:#8ab4ff; --shadow:0 12px 40px rgba(0,0,0,.55);
+    :root {
+      --bg: #0a0f16;
+      --text: #e7eef7;
+      --muted: #9fb0c5;
+      --pillBorder: rgba(255,255,255,.16);
+      --red: #ff2a2a;
+      --red2: #d91f1f;
+      --link: #8ab4ff;
+      --shadow: 0 12px 40px rgba(0,0,0,.55);
+      --card-bg: linear-gradient(180deg, rgba(13,22,33,.82), rgba(10,16,24,.72));
+      --top-bg: linear-gradient(180deg, rgba(15,24,36,.92), rgba(12,19,29,.72));
+    }
+    body.light {
+      --bg: #f8f9fa;
+      --text: #212529;
+      --muted: #6c757d;
+      --pillBorder: rgba(0,0,0,.12);
+      --link: #0d6efd;
+      --shadow: 0 12px 40px rgba(0,0,0,.15);
+      --card-bg: linear-gradient(180deg, #ffffff, #f8f9fa);
+      --top-bg: linear-gradient(180deg, #ffffff, #f0f2f5);
     }
     *{box-sizing:border-box}
     body{
@@ -315,19 +331,35 @@ BASE_HTML = r"""
       font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial;
       color:var(--text);
       background:
-        radial-gradient(1100px 600px at 20% -10%, rgba(255,42,42,.12), transparent 60%),
-        radial-gradient(900px 520px at 80% 0%, rgba(138,180,255,.10), transparent 55%),
-        linear-gradient(180deg, var(--bg), #070b10 60%);
+        radial-gradient(1100px 600px at 20% -10%, rgba(255,42,42,.08), transparent 60%),
+        radial-gradient(900px 520px at 80% 0%, rgba(138,180,255,.08), transparent 55%),
+        var(--bg);
       line-height:1.45;
+      transition: background 0.3s ease;
     }
     a{color:var(--link);text-decoration:none}
     a:hover{text-decoration:underline}
     .wrap{max-width:1100px;margin:0 auto;padding:16px}
     .top{
       border-radius:22px;padding:16px 16px 14px;
-      border:1px solid rgba(255,255,255,.10);
-      background: linear-gradient(180deg, rgba(15,24,36,.92), rgba(12,19,29,.72));
+      border:1px solid var(--pillBorder);
+      background: var(--top-bg);
       box-shadow: var(--shadow);
+      position: relative;
+    }
+    .theme-toggle {
+      position: absolute;
+      top: 16px;
+      right: 16px;
+      background: none;
+      border: none;
+      font-size: 1.4rem;
+      cursor: pointer;
+      color: var(--text);
+      transition: transform 0.2s;
+    }
+    .theme-toggle:hover {
+      transform: scale(1.15);
     }
     .title{font-size:28px;font-weight:900;margin:0}
     .sub{margin:6px 0 0;color:var(--muted);font-size:13px}
@@ -335,8 +367,9 @@ BASE_HTML = r"""
     .searchbar input{
       flex:1;min-width:min(520px, 78vw);
       padding:12px 14px;border-radius:14px;
-      border:1px solid rgba(255,255,255,.14);
-      background: rgba(7,11,16,.75);color:var(--text);outline:none;
+      border:1px solid var(--pillBorder);
+      background: rgba(255,255,255,0.05);
+      color:var(--text);outline:none;
     }
     .searchbar button{
       padding:12px 16px;border-radius:14px;
@@ -349,7 +382,7 @@ BASE_HTML = r"""
       display:inline-flex;align-items:center;
       padding:9px 12px;border-radius:999px;
       border:1px solid var(--pillBorder);
-      background: linear-gradient(180deg, rgba(18,31,46,.95), rgba(10,18,28,.85));
+      background: linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.03));
       color:var(--text);font-size:13px;transition:all .12s ease;
     }
     .pill:hover{transform:translateY(-1px);border-color: rgba(138,180,255,.22);}
@@ -357,19 +390,20 @@ BASE_HTML = r"""
       border-color: rgba(255,42,42,.70);
       box-shadow: 0 0 0 3px rgba(255,42,42,.12) inset, 0 10px 26px rgba(255,42,42,.12);
     }
-    .ad{margin:16px 0 10px;border:1px dashed rgba(255,255,255,.26);border-radius:18px;padding:14px;color:var(--muted);text-align:center}
+    .ad{margin:16px 0 10px;border:1px dashed var(--muted);border-radius:18px;padding:14px;color:var(--muted);text-align:center}
     h2{margin:18px 0 10px;font-size:28px}
     .card{
-      border:1px solid rgba(255,255,255,.10);
+      border:1px solid var(--pillBorder);
       border-radius:22px;padding:16px;
-      background: linear-gradient(180deg, rgba(13,22,33,.82), rgba(10,16,24,.72));
-      box-shadow: 0 16px 44px rgba(0,0,0,.38);
+      background: var(--card-bg);
+      box-shadow: var(--shadow);
       margin:14px 0;
+      transition: all 0.3s ease;
     }
     .card h3{margin:0 0 10px;font-size:18px;line-height:1.25}
-    .summary{margin-top:6px;color:#d7e2f1}
+    .summary{margin-top:6px;color:var(--text);opacity:0.95}
     .meta{margin-top:12px;color:var(--muted);font-size:12px;display:flex;gap:12px;flex-wrap:wrap;align-items:center}
-    .topicTag{padding:4px 10px;border-radius:999px;border:1px solid rgba(255,255,255,.14);background: rgba(255,255,255,.04);color:#cfe0f7;font-weight:700}
+    .topicTag{padding:4px 10px;border-radius:999px;border:1px solid var(--pillBorder);background: rgba(255,255,255,.04);color:var(--text);font-weight:700}
     .readbtn{
       display:inline-flex;align-items:center;
       padding:11px 14px;border-radius:14px;
@@ -391,6 +425,7 @@ BASE_HTML = r"""
   <div class="wrap">
     <div class="top">
       <h1 class="title">News Aggregator</h1>
+      <button id="theme-toggle" class="theme-toggle" title="Toggle dark/light mode">🌙</button>
       <div class="sub">
         Real-time updates on your tracked topics
         {% if last_updated and last_updated != "Never" %}
@@ -439,6 +474,24 @@ BASE_HTML = r"""
   const btn = document.getElementById('loadMore');
   const status = document.getElementById('loadStatus');
   const list = document.getElementById('stories');
+
+  // Theme toggle
+  const themeToggle = document.getElementById('theme-toggle');
+  const currentTheme = localStorage.getItem('theme') || 'dark';
+  if (currentTheme === 'light') {
+    document.body.classList.add('light');
+    themeToggle.textContent = '☀️';
+  } else {
+    themeToggle.textContent = '🌙';
+  }
+
+  themeToggle.addEventListener('click', () => {
+    document.body.classList.toggle('light');
+    const isLight = document.body.classList.contains('light');
+    themeToggle.textContent = isLight ? '☀️' : '🌙';
+    localStorage.setItem('theme', isLight ? 'light' : 'dark');
+  });
+
   function escapeHtml(s){
     return (s || '').replace(/[&<>"']/g, c => ({
       '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
