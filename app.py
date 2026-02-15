@@ -245,19 +245,31 @@ def get_all_topics():
     ]
 def serialize_story(s):
     ts = s.get("added_at")
-    if isinstance(ts, datetime):
-        ts = (ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)).astimezone(timezone.utc).isoformat()
-    elif ts is not None:
-        ts = str(ts)
-    topic_raw = s.get("topic") or ""
-    summary_raw = s.get("summary") or ""
+    if ts:
+        # Parse UTC ISO string or datetime
+        if isinstance(ts, str):
+            dt_utc = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+        elif isinstance(ts, datetime):
+            dt_utc = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+        else:
+            dt_utc = None
+        
+        if dt_utc:
+            # Convert to CST (America/Chicago)
+            cst_tz = pytz.timezone('America/Chicago')
+            dt_local = dt_utc.astimezone(cst_tz)
+            # Nice format: e.g., "Feb 15, 2026 8:35 AM CST"
+            local_str = dt_local.strftime("%b %d, %Y %I:%M %p %Z")
+        else:
+            local_str = ""
+    else:
+        local_str = ""
+    
+    # ... rest of the function unchanged ...
     return {
-        "title": s.get("title") or "",
-        "link": s.get("link") or "",
-        "topic": topic_raw,
-        "topic_label": normalize_topic_label(topic_raw),
-        "summary": normalize_summary_for_display(summary_raw),
-        "added_at": ts or "",
+        # ...
+        "added_at": local_str,
+        # ...
     }
 # ---------------- Routes ----------------
 @app.get("/health")
