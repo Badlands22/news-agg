@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import html
 import hashlib
 import sqlite3
 from datetime import datetime, timezone
@@ -143,7 +144,6 @@ def canonical_topic_label(topic_key: str) -> str:
     k = t.lower()
     if k in CANON_TOPIC:
         return CANON_TOPIC[k]
-    # default: title-case, but preserve short all-caps
     if t.isupper() and len(t) <= 8:
         return t
     return t.title()
@@ -186,7 +186,6 @@ def init_db():
                     );
                     """
                 )
-                # fingerprint column + unique index for cross-feed dedupe
                 c.execute("ALTER TABLE public.articles ADD COLUMN IF NOT EXISTS fingerprint TEXT;")
                 c.execute("CREATE UNIQUE INDEX IF NOT EXISTS articles_fingerprint_uniq ON public.articles(fingerprint);")
                 c.execute("CREATE INDEX IF NOT EXISTS articles_added_at_idx ON public.articles (added_at DESC);")
@@ -220,9 +219,7 @@ def init_db():
 def clean_text(text: str) -> str:
     if not text:
         return ""
-    # strip HTML tags
     text = re.sub(r"<[^>]+>", "", text)
-    # decode a few common entities (keep it simple/cheap)
     text = (
         text.replace("\xa0", " ")
         .replace("&amp;", "&")
@@ -230,9 +227,7 @@ def clean_text(text: str) -> str:
         .replace("&gt;", ">")
         .replace("&quot;", '"')
     )
-    # remove zero-width and NBSP variants
-    text = re.sub(r"[\xa0\u200b\u200c\u200d]", " ", text)
-    # collapse whitespace
+    text = re.sub(r"[\xa0\u200b\u200c\u200d\u2060\ufeff]", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
@@ -245,30 +240,44 @@ def normalize_for_fingerprint(title: str) -> str:
 
 
 def make_fingerprint(title: str, topic_key: str) -> str:
-    # fingerprint should be stable regardless of display casing
     base = f"{normalize_for_fingerprint(title)}|{(topic_key or '').strip().lower()}"
     return hashlib.md5(base.encode("utf-8", errors="ignore")).hexdigest()
 
 
+# ---------------- SUMMARY SANITIZATION (FIX) ----------------
 def sanitize_summary(text: str) -> str:
     """
     Make summaries safe + consistent:
-    - convert <br> tags (and escaped variants) to newlines
-    - strip any stray HTML tags
-    - normalize whitespace but KEEP newlines
+    - removes zero-width chars / BOM
+    - repeatedly html.unescape() to catch double/triple escaped <br>
+    - removes the literal 'Summary:<br>' pattern if present
+    - converts ANY <br ...> (attributes/spaces/casing) to newlines
+    - strips any remaining HTML tags
+    - keeps newlines (for UI to render as breaks)
     """
     if not text:
         return ""
-    t = text.strip()
 
-    # handle escaped <br> variants first
-    t = t.replace("&lt;br&gt;", "\n").replace("&lt;br/&gt;", "\n").replace("&lt;br /&gt;", "\n")
+    t = str(text)
 
-    # handle real <br> tags (any case, any spacing)
-    t = re.sub(r"(?i)<br\s*/?>", "\n", t)
+    # remove zero-width chars/BOM that can defeat matching
+    t = re.sub(r"[\u200b\u200c\u200d\u2060\ufeff]", "", t).strip()
 
-    # remove any other HTML tags
-    t = re.sub(r"<[^>]+>", "", t)
+    # repeatedly unescape (&amp;lt;br&amp;gt; -> &lt;br&gt; -> <br>)
+    for _ in range(8):
+        t2 = html.unescape(t)
+        if t2 == t:
+            break
+        t = t2
+
+    # normalize common "Summary:<br>" literal if the model outputs it
+    t = re.sub(r"(?i)^\s*summary\s*:\s*<\s*br\b[^>]*>\s*", "Summary:\n", t)
+
+    # convert ANY <br ...> to newline
+    t = re.sub(r"(?is)<\s*br\b[^>]*>", "\n", t)
+
+    # strip any remaining HTML tags
+    t = re.sub(r"(?is)<[^>]+>", "", t)
 
     # normalize line endings
     t = t.replace("\r\n", "\n").replace("\r", "\n")
@@ -278,8 +287,8 @@ def sanitize_summary(text: str) -> str:
 
     # collapse excessive blank lines
     t = re.sub(r"\n{4,}", "\n\n\n", t).strip()
-    return t
 
+    return t
 
 
 def insert_stub(title: str, link: str, desc: str, pub_date: str, topic_label: str, fingerprint: str):
@@ -324,6 +333,7 @@ def insert_stub(title: str, link: str, desc: str, pub_date: str, topic_label: st
 def update_summary(article_id: int, summary: str):
     if summary is None:
         return
+
     summary = sanitize_summary(summary)
     if not summary:
         return
@@ -355,15 +365,17 @@ def xai_summary(title: str, desc: str, feed_name: str, topic_label: str):
     if _xai_client is None:
         _xai_client = Client(api_key=XAI_API_KEY, timeout=60)
 
+    # IMPORTANT: tell the model to NEVER use HTML or <br>
     prompt = f"""Summarize this news item for a monitoring dashboard.
 
 Rules:
-- Plain text only. NO HTML. NO <br>.
+- Output PLAIN TEXT only. No HTML. No tags. Do not output <br> in any form.
+- Use real newlines for spacing.
 - Do NOT restate the headline verbatim.
 - If the snippet is thin/unclear, explicitly say what's unknown.
 - Keep it high-signal and compact.
 
-Output EXACTLY this format (use newlines):
+Output format (plain text with newlines only):
 Summary:
 <1-2 sentences>
 
@@ -387,7 +399,7 @@ Snippet: {desc}
 
     try:
         chat = _xai_client.chat.create(model=XAI_MODEL)
-        chat.append(system("You write concise, high-signal news summaries for analysts."))
+        chat.append(system("You write concise, high-signal news summaries for analysts. Plain text only."))
         chat.append(user(prompt))
         resp = chat.sample()
         text = (resp.content or "").strip()
@@ -449,13 +461,9 @@ def process_feed(feed_name: str, url: str):
             if not matched_key:
                 continue
 
-            # Stable fingerprint uses topic KEY (lowercased inside make_fingerprint)
             fp = make_fingerprint(title, matched_key)
-
-            # Canonical label stored to DB (fixes 'trump' vs 'Trump' mismatch)
             topic_label = canonical_topic_label(matched_key)
 
-            # INSERT STUB FIRST: prevents duplicate crashes AND avoids wasting xAI tokens on duplicates.
             new_id = insert_stub(
                 title=clean_text(title),
                 link=link,
@@ -466,7 +474,6 @@ def process_feed(feed_name: str, url: str):
             )
 
             if not new_id:
-                # duplicate by link or fingerprint -> safe skip
                 print(f"Already seen (dedup): {link}")
                 continue
 
@@ -486,7 +493,6 @@ def process_feed(feed_name: str, url: str):
                 print("Saved (no summary).")
 
         except Exception as e:
-            # Per-entry safety: never let one bad row kill the loop
             print(f"Entry error: {e}")
 
 
@@ -514,7 +520,6 @@ def main():
             break
 
         except Exception as e:
-            # Safety net: if something goes wrong at the cycle level
             print(f"Error in main loop: {e}")
             time.sleep(30)
 
