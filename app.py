@@ -154,7 +154,7 @@ def get_recent_stories(limit=12, search=None, page=1):
         term = f"%{search}%"
         if using_postgres():
             q = """
-                SELECT title, link, topic, summary, added_at, image_url
+                SELECT title, link, topic, summary, added_at
                 FROM public.articles
                 WHERE title ILIKE %s OR topic ILIKE %s OR summary ILIKE %s
                 ORDER BY added_at DESC
@@ -163,7 +163,7 @@ def get_recent_stories(limit=12, search=None, page=1):
             rows = fetch_rows(q, (term, term, term, limit, offset))
         else:
             q = """
-                SELECT title, link, topic, summary, added_at, image_url
+                SELECT title, link, topic, summary, added_at
                 FROM articles
                 WHERE title LIKE ? OR topic LIKE ? OR summary LIKE ?
                 ORDER BY added_at DESC
@@ -173,7 +173,7 @@ def get_recent_stories(limit=12, search=None, page=1):
     else:
         if using_postgres():
             q = """
-                SELECT title, link, topic, summary, added_at, image_url
+                SELECT title, link, topic, summary, added_at
                 FROM public.articles
                 ORDER BY added_at DESC
                 LIMIT %s OFFSET %s
@@ -181,7 +181,7 @@ def get_recent_stories(limit=12, search=None, page=1):
             rows = fetch_rows(q, (limit, offset))
         else:
             q = """
-                SELECT title, link, topic, summary, added_at, image_url
+                SELECT title, link, topic, summary, added_at
                 FROM articles
                 ORDER BY added_at DESC
                 LIMIT ? OFFSET ?
@@ -197,7 +197,7 @@ def get_topic_stories(topic, limit=12, page=1):
         return cached
     if using_postgres():
         q = """
-            SELECT title, link, topic, summary, added_at, image_url
+            SELECT title, link, topic, summary, added_at
             FROM public.articles
             WHERE lower(topic) = lower(%s)
             ORDER BY added_at DESC
@@ -206,7 +206,7 @@ def get_topic_stories(topic, limit=12, page=1):
         rows = fetch_rows(q, (topic, limit, offset))
     else:
         q = """
-            SELECT title, link, topic, summary, added_at, image_url
+            SELECT title, link, topic, summary, added_at
             FROM articles
             WHERE lower(topic) = lower(?)
             ORDER BY added_at DESC
@@ -262,7 +262,7 @@ def serialize_story(s):
             # Nice format: e.g., "Feb 15, 2026 8:35 AM CST"
             local_str = dt_local.strftime("%b %d, %Y %I:%M %p %Z")
         else:
-            local_str = str(ts)  # fallback
+            local_str = str(ts) # fallback
     else:
         local_str = ""
     
@@ -276,7 +276,6 @@ def serialize_story(s):
         "topic_label": normalize_topic_label(topic_raw),
         "summary": normalize_summary_for_display(summary_raw),
         "added_at": local_str,
-        "image_url": s.get("image_url") or "",
     }
 # ---------------- Routes ----------------
 @app.get("/health")
@@ -451,12 +450,6 @@ BASE_HTML = r"""
     <div id="stories">
       {% for story in stories %}
         <div class="card">
-          {% if story['image_url'] %}
-            <img src="{{ story['image_url'] }}" 
-                 alt="{{ story['title'] | e }}" 
-                 loading="lazy"
-                 style="width: 100%; max-height: 220px; object-fit: cover; border-radius: 10px 10px 0 0; margin-bottom: 12px; display: block;">
-          {% endif %}
           <h3>{{ story['title'] }}</h3>
           {% if story['summary'] %}
             <div class="summary" style="white-space: pre-line;">{{ story['summary'] | e }}</div>
