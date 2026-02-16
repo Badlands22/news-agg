@@ -4,11 +4,9 @@ import time
 import html
 import hashlib
 import sqlite3
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 import feedparser
-import difflib
 
-# ---------------- Postgres (Render) ----------------
 try:
     import psycopg  # type: ignore
 except Exception:
@@ -18,7 +16,6 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 DB_PATH = "news.db"
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "30"))
 
-# ---------------- xAI (Grok) summaries ----------------
 try:
     from xai_sdk import Client
     from xai_sdk.chat import user, system
@@ -31,7 +28,6 @@ XAI_API_KEY = os.getenv("XAI_API_KEY")
 XAI_MODEL = os.getenv("XAI_MODEL", "grok-4")
 _xai_client = None
 
-# ---------------- Feeds ----------------
 FEEDS = [
     {"name": "BBC", "url": "http://feeds.bbci.co.uk/news/rss.xml"},
     {"name": "BBC World", "url": "http://feeds.bbci.co.uk/news/world/rss.xml"},
@@ -46,7 +42,6 @@ FEEDS = [
     {"name": "Google News (AI 24h)", "url": "https://news.google.com/rss/search?q=artificial+intelligence+when:1d&hl=en-US&gl=US&ceid=US:en"},
 ]
 
-# Topics you match against (these are "keys" used for matching)
 TOPICS = [
     "election",
     "trump",
@@ -84,7 +79,6 @@ TOPICS = [
     "sahel",
 ]
 
-# Which topic keys should get AI summaries
 AI_SUMMARY_TOPICS = [
     "election",
     "trump",
@@ -98,7 +92,6 @@ AI_SUMMARY_TOPICS = [
 ]
 AI_SUMMARY_TOPICS_SET = {t.strip().lower() for t in AI_SUMMARY_TOPICS}
 
-# Canonical display labels for topic storage + UI consistency
 CANON_TOPIC = {
     "fbi": "FBI",
     "ufo": "UFO",
@@ -144,7 +137,6 @@ def canonical_topic_label(topic_key: str) -> str:
         return t
     return t.title()
 
-# ---------------- DATABASE HELPERS ----------------
 def using_postgres() -> bool:
     return bool(DATABASE_URL)
 
@@ -170,12 +162,11 @@ def init_db():
                         pub_date TEXT,
                         topic TEXT,
                         summary TEXT,
-                        added_at TIMESTAMPTZ,
-                        fingerprint TEXT,
-                        image_url TEXT
+                        added_at TIMESTAMPTZ
                     );
                     """
                 )
+                c.execute("ALTER TABLE public.articles ADD COLUMN IF NOT EXISTS fingerprint TEXT;")
                 c.execute("CREATE UNIQUE INDEX IF NOT EXISTS articles_fingerprint_uniq ON public.articles(fingerprint);")
                 c.execute("CREATE INDEX IF NOT EXISTS articles_added_at_idx ON public.articles (added_at DESC);")
                 c.execute("CREATE INDEX IF NOT EXISTS articles_topic_added_at_idx ON public.articles (topic, added_at DESC);")
@@ -194,8 +185,7 @@ def init_db():
                 topic TEXT,
                 summary TEXT,
                 added_at TEXT,
-                fingerprint TEXT,
-                image_url TEXT
+                fingerprint TEXT
             );
             """
         )
@@ -222,17 +212,6 @@ def clean_text(text: str) -> str:
 
 def normalize_for_fingerprint(title: str) -> str:
     t = clean_text(title).lower()
-    prefixes = [
-        r'^(trump\s+(says|announces|claims|stated|told|reveals|declares|said|says)\s+)',
-        r'^(president\s+donald\s+trump\s+)',
-        r'^(president\s+trump\s+)',
-        r'^trump\s+',
-        r'\s+-\s+the\s+.*?$',
-        r'\s+-\s+.*?$',
-        r'\s*\|\s+.*?$',
-    ]
-    for p in prefixes:
-        t = re.sub(p, '', t, flags=re.IGNORECASE)
     t = re.sub(r"[^\w\s]", " ", t)
     t = re.sub(r"\s+", " ", t).strip()
     return t
@@ -259,19 +238,19 @@ def sanitize_summary(text: str) -> str:
     t = re.sub(r"\n{4,}", "\n\n\n", t).strip()
     return t
 
-def insert_stub(title: str, link: str, desc: str, pub_date: str, topic_label: str, fingerprint: str, image_url: str = None):
+def insert_stub(title: str, link: str, desc: str, pub_date: str, topic_label: str, fingerprint: str):
     added_at = datetime.now(timezone.utc)
     if using_postgres():
         with pg_connect() as conn:
             with conn.cursor() as c:
                 c.execute(
                     """
-                    INSERT INTO public.articles (title, link, description, pub_date, topic, summary, added_at, fingerprint, image_url)
-                    VALUES (%s, %s, %s, %s, %s, NULL, %s, %s, %s)
+                    INSERT INTO public.articles (title, link, description, pub_date, topic, summary, added_at, fingerprint)
+                    VALUES (%s, %s, %s, %s, %s, NULL, %s, %s)
                     ON CONFLICT DO NOTHING
                     RETURNING id;
                     """,
-                    (title, link, desc, pub_date, topic_label, added_at, fingerprint, image_url),
+                    (title, link, desc, pub_date, topic_label, added_at, fingerprint),
                 )
                 row = c.fetchone()
             conn.commit()
@@ -281,10 +260,10 @@ def insert_stub(title: str, link: str, desc: str, pub_date: str, topic_label: st
     added_at_str = added_at.isoformat()
     cur.execute(
         """
-        INSERT OR IGNORE INTO articles (title, link, description, pub_date, topic, summary, added_at, fingerprint, image_url)
-        VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?);
+        INSERT OR IGNORE INTO articles (title, link, description, pub_date, topic, summary, added_at, fingerprint)
+        VALUES (?, ?, ?, ?, ?, NULL, ?, ?);
         """,
-        (title, link, desc, pub_date, topic_label, added_at_str, fingerprint, image_url),
+        (title, link, desc, pub_date, topic_label, added_at_str, fingerprint),
     )
     conn.commit()
     new_id = cur.lastrowid if cur.rowcount == 1 else None
@@ -370,21 +349,14 @@ def process_feed(feed_name: str, url: str):
     if not entries:
         print(f"No entries found in {feed_name}")
         return
-
-    recent_cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-    cutoff_str = recent_cutoff.isoformat()
-
     for entry in entries:
         try:
             title = (entry.get("title") or "").strip()
             link = (entry.get("link") or "").strip()
             desc = (entry.get("description") or entry.get("summary") or "").strip()
-            content = entry.get("content", [{}])[0].get("value", "") if entry.get("content") else ""
             pub_date = entry.get("published") or entry.get("updated") or datetime.now(timezone.utc).isoformat()
-
             if not title or not link:
                 continue
-
             norm_title = normalize_for_fingerprint(title)
             norm_desc = clean_text(desc).lower()
             matched_key = None
@@ -395,75 +367,8 @@ def process_feed(feed_name: str, url: str):
                     break
             if not matched_key:
                 continue
-
             fp = make_fingerprint(title, matched_key)
             topic_label = canonical_topic_label(matched_key)
-
-            # Fuzzy duplicate check
-            is_duplicate = False
-            if using_postgres():
-                with pg_connect() as conn:
-                    with conn.cursor() as c:
-                        c.execute(
-                            """
-                            SELECT title FROM public.articles 
-                            WHERE topic = %s AND added_at > %s 
-                            ORDER BY added_at DESC LIMIT 10;
-                            """,
-                            (topic_label, cutoff_str)
-                        )
-                        recent_titles = [row[0] for row in c.fetchall()]
-            else:
-                conn = sqlite_connect()
-                cur = conn.cursor()
-                cur.execute(
-                    """
-                    SELECT title FROM articles 
-                    WHERE topic = ? AND added_at > ? 
-                    ORDER BY added_at DESC LIMIT 10;
-                    """,
-                    (topic_label, cutoff_str)
-                )
-                recent_titles = [row[0] for row in cur.fetchall()]
-                conn.close()
-
-            for recent_title in recent_titles:
-                if recent_title:
-                    recent_norm = normalize_for_fingerprint(recent_title)
-                    similarity = difflib.SequenceMatcher(None, norm_title, recent_norm).ratio()
-                    if similarity > 0.85:
-                        print(f"Fuzzy dupe skipped (sim={similarity:.2f}): {title} vs {recent_title}")
-                        is_duplicate = True
-                        break
-
-            if is_duplicate:
-                continue
-
-            # Extract best image URL
-            image_url = None
-            if 'media_thumbnail' in entry and entry.media_thumbnail:
-                image_url = entry.media_thumbnail[0].get('url')
-            elif 'media_content' in entry:
-                for mc in entry.media_content:
-                    if mc.get('medium') == 'image' or 'image' in mc.get('type', ''):
-                        image_url = mc.get('url')
-                        break
-            elif 'enclosures' in entry:
-                for enc in entry.enclosures:
-                    if 'image' in enc.get('type', ''):
-                        image_url = enc.get('href')
-                        break
-
-            if not image_url:
-                combined = desc or content
-                img_match = re.search(r'<img[^>]+src=["\'](.*?)["\']', combined, re.IGNORECASE)
-                if img_match:
-                    image_url = img_match.group(1)
-
-            if image_url and not image_url.startswith(('http://', 'https://')):
-                from urllib.parse import urljoin
-                image_url = urljoin(link, image_url)
-
             new_id = insert_stub(
                 title=clean_text(title),
                 link=link,
@@ -471,12 +376,10 @@ def process_feed(feed_name: str, url: str):
                 pub_date=str(pub_date),
                 topic_label=topic_label,
                 fingerprint=fp,
-                image_url=image_url
             )
             if not new_id:
                 print(f"Already seen (dedup): {link}")
                 continue
-
             print(f"NEW [{feed_name}] (topic={topic_label}): {title}")
             summary = None
             if (matched_key or "").strip().lower() in AI_SUMMARY_TOPICS_SET:
@@ -488,7 +391,6 @@ def process_feed(feed_name: str, url: str):
                 print("Saved + summarized.")
             else:
                 print("Saved (no summary).")
-
         except Exception as e:
             print(f"Entry error: {e}")
 
