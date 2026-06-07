@@ -486,6 +486,36 @@ BASE_HTML = r"""
 </head>
 <body>
 
+{% macro story_card(s) %}
+<div class="card">
+  <div class="card-topic">{{ s.topic }}</div>
+  <h3>{{ s.title }}</h3>
+
+  {% if s.summary %}
+    <div class="summary-section">
+      <div class="summary-label">Summary</div>
+      <div class="summary-text">{{ s.summary }}</div>
+    </div>
+  {% endif %}
+
+  {% if s.bullets %}
+    <ul class="bullets">
+      {% for b in s.bullets %}<li>{{ b }}</li>{% endfor %}
+    </ul>
+  {% endif %}
+
+  <div class="card-footer">
+    <div class="card-meta">
+      {% if s.source %}<span class="source-tag">{{ s.source }}</span>{% endif %}
+      {% if s.added_at %}<span class="time-tag">{{ s.added_at }}</span>{% endif %}
+    </div>
+    <a class="read-btn" href="{{ s.link }}" target="_blank" rel="noopener noreferrer">
+      Read story →
+    </a>
+  </div>
+</div>
+{% endmacro %}
+
 <div class="page">
 
   <!-- Header -->
@@ -574,36 +604,6 @@ BASE_HTML = r"""
   </div>
 
 </div><!-- /page -->
-
-{% macro story_card(s) %}
-<div class="card">
-  <div class="card-topic">{{ s.topic }}</div>
-  <h3>{{ s.title }}</h3>
-
-  {% if s.summary %}
-    <div class="summary-section">
-      <div class="summary-label">Summary</div>
-      <div class="summary-text">{{ s.summary }}</div>
-    </div>
-  {% endif %}
-
-  {% if s.bullets %}
-    <ul class="bullets">
-      {% for b in s.bullets %}<li>{{ b }}</li>{% endfor %}
-    </ul>
-  {% endif %}
-
-  <div class="card-footer">
-    <div class="card-meta">
-      {% if s.source %}<span class="source-tag">{{ s.source }}</span>{% endif %}
-      {% if s.added_at %}<span class="time-tag">{{ s.added_at }}</span>{% endif %}
-    </div>
-    <a class="read-btn" href="{{ s.link }}" target="_blank" rel="noopener noreferrer">
-      Read story →
-    </a>
-  </div>
-</div>
-{% endmacro %}
 
 <script>
 (function () {
