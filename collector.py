@@ -117,6 +117,10 @@ def init_db():
                         fingerprint TEXT UNIQUE
                     );
                 """)
+                # Add new columns to existing tables without breaking old installs
+                c.execute("ALTER TABLE public.articles ADD COLUMN IF NOT EXISTS source TEXT;")
+                c.execute("ALTER TABLE public.articles ADD COLUMN IF NOT EXISTS fingerprint TEXT;")
+                c.execute("CREATE UNIQUE INDEX IF NOT EXISTS articles_fingerprint_uniq ON public.articles (fingerprint);")
                 c.execute("CREATE INDEX IF NOT EXISTS articles_added_at_idx ON public.articles (added_at DESC);")
                 c.execute("CREATE INDEX IF NOT EXISTS articles_topic_idx ON public.articles (topic, added_at DESC);")
     else:
