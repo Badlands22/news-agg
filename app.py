@@ -1003,8 +1003,8 @@ BRIEF_HTML = r"""
         <div class="card-summary">{{ s.summary }}</div>
       {% endif %}
       <button class="brief-btn"
-              onclick="genBrief(this, {{ loop.index }}, {{ s|tojson }})"
-              data-idx="{{ loop.index }}">
+              data-idx="{{ loop.index }}"
+              data-story="{{ s|tojson|e }}">
         ⚡ Generate Brief
       </button>
       <a class="read-link" href="{{ s.link }}" target="_blank" rel="noopener noreferrer">
@@ -1028,6 +1028,13 @@ BRIEF_HTML = r"""
 </div>
 
 <script>
+document.querySelectorAll('.brief-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const story = JSON.parse(btn.getAttribute('data-story'));
+    genBrief(btn, btn.dataset.idx, story);
+  });
+});
+
 async function genBrief(btn, idx, story) {
   btn.disabled = true;
   btn.textContent = 'Generating…';
