@@ -1004,7 +1004,7 @@ BRIEF_HTML = r"""
       {% endif %}
       <button class="brief-btn"
               data-idx="{{ loop.index }}"
-              data-story="{{ s|tojson|e }}">
+              data-link="{{ s.link|e }}">
         ⚡ Generate Brief
       </button>
       <a class="read-link" href="{{ s.link }}" target="_blank" rel="noopener noreferrer">
@@ -1029,13 +1029,12 @@ BRIEF_HTML = r"""
 
 <script>
 document.querySelectorAll('.brief-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    const story = JSON.parse(btn.getAttribute('data-story'));
-    genBrief(btn, btn.dataset.idx, story);
-  });
+  btn.addEventListener('click', () => genBrief(btn));
 });
 
-async function genBrief(btn, idx, story) {
+async function genBrief(btn) {
+  const idx  = btn.dataset.idx;
+  const link = btn.dataset.link;
   btn.disabled = true;
   btn.textContent = 'Generating…';
   const out = document.getElementById('brief-' + idx);
@@ -1046,7 +1045,7 @@ async function genBrief(btn, idx, story) {
     const res = await fetch('/api/brief', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(story)
+      body: JSON.stringify({ link: link })
     });
     const data = await res.json();
     const text = data.brief || 'Error generating brief.';
@@ -1140,13 +1139,27 @@ def api_brief():
     if not brief_authed():
         return jsonify({"error": "unauthorized"}), 401
     data = request.get_json(force=True) or {}
+    link = data.get("link", "")
+
+    # Look up story from DB by link
+    tbl = "public.articles" if using_postgres() else "articles"
+    ph  = "%s" if using_postgres() else "?"
+    rows = fetch_rows(
+        f"SELECT title, link, source, topic, summary, description FROM {tbl} WHERE link = {ph} LIMIT 1",
+        (link,)
+    )
+    if not rows:
+        return jsonify({"brief": "Story not found in database."})
+
+    row = rows[0]
+    parsed = parse_summary(row.get("summary") or row.get("description") or "")
     brief_text = generate_brief(
-        title=data.get("title", ""),
-        summary=data.get("summary", ""),
-        bullets=data.get("bullets", []),
-        topic=data.get("topic", ""),
-        source=data.get("source", ""),
-        link=data.get("link", ""),
+        title=row.get("title", ""),
+        summary=parsed["summary"],
+        bullets=parsed["bullets"],
+        topic=row.get("topic", ""),
+        source=row.get("source", ""),
+        link=link,
     )
     return jsonify({"brief": brief_text})
 
