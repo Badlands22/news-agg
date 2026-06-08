@@ -181,6 +181,67 @@ def get_article_counts():
     return result
 
 
+# ── Brief DB helpers ──────────────────────────────────────────────────────────
+
+_brief_cols_ensured = False
+
+def ensure_brief_columns():
+    """Add saved_brief / briefed_at columns if they don't exist yet."""
+    global _brief_cols_ensured
+    if _brief_cols_ensured:
+        return
+    try:
+        if using_postgres():
+            with pg_connect() as conn:
+                with conn.cursor() as c:
+                    c.execute("ALTER TABLE public.articles ADD COLUMN IF NOT EXISTS saved_brief TEXT;")
+                    c.execute("ALTER TABLE public.articles ADD COLUMN IF NOT EXISTS briefed_at TIMESTAMPTZ;")
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            for col in ["saved_brief TEXT", "briefed_at TEXT"]:
+                try:
+                    conn.execute(f"ALTER TABLE articles ADD COLUMN {col};")
+                except Exception:
+                    pass
+            conn.commit()
+            conn.close()
+    except Exception as e:
+        print(f"[DB migrate brief cols] {e}")
+    _brief_cols_ensured = True
+
+
+def save_brief_to_db(link, brief_text):
+    """Persist a generated brief back to the article row."""
+    briefed_at = datetime.now(timezone.utc)
+    try:
+        if using_postgres():
+            with pg_connect() as conn:
+                with conn.cursor() as c:
+                    c.execute(
+                        "UPDATE public.articles SET saved_brief=%s, briefed_at=%s WHERE link=%s",
+                        (brief_text, briefed_at, link)
+                    )
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute(
+                "UPDATE articles SET saved_brief=?, briefed_at=? WHERE link=?",
+                (brief_text, briefed_at.isoformat(), link)
+            )
+            conn.commit()
+            conn.close()
+    except Exception as e:
+        print(f"[DB save brief] {e}")
+
+
+def get_saved_briefs():
+    """Return all articles that have a saved brief, newest first."""
+    tbl = "public.articles" if using_postgres() else "articles"
+    return fetch_rows(
+        f"SELECT title, link, source, topic, saved_brief, briefed_at "
+        f"FROM {tbl} WHERE saved_brief IS NOT NULL ORDER BY briefed_at DESC"
+    )
+
+
 # ── Serialization ─────────────────────────────────────────────────────────────
 
 def parse_summary(text):
@@ -978,9 +1039,12 @@ BRIEF_HTML = r"""
       <div class="brand">Daily<span>Herald</span> Brief</div>
       <div class="brand-sub">Badlands Media · Show Prep · Private</div>
     </div>
-    <form method="post" action="/brief/logout">
-      <button class="logout-btn" type="submit">Log out</button>
-    </form>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <a href="/brief/saved" style="font-size:12px;color:var(--gold);border:1px solid var(--gold);border-radius:8px;padding:6px 12px;font-weight:700;text-decoration:none;">📁 Saved Briefs</a>
+      <form method="post" action="/brief/logout">
+        <button class="logout-btn" type="submit">Log out</button>
+      </form>
+    </div>
   </div>
 
   <div class="filter-row">
@@ -1005,12 +1069,16 @@ BRIEF_HTML = r"""
       <button class="brief-btn"
               data-idx="{{ loop.index }}"
               data-link="{{ s.link|e }}">
-        ⚡ Generate Brief
+        {% if s.saved_brief %}⚡ Regenerate{% else %}⚡ Generate Brief{% endif %}
       </button>
+      {% if s.saved_brief %}
+        <span style="font-size:11px;color:var(--gold);margin-left:10px;font-weight:700;">✓ Saved</span>
+      {% endif %}
       <a class="read-link" href="{{ s.link }}" target="_blank" rel="noopener noreferrer">
         Read source →
       </a>
-      <div class="brief-out" id="brief-{{ loop.index }}">
+      <div class="brief-out" id="brief-{{ loop.index }}"
+           {% if s.saved_brief %}data-saved="{{ s.saved_brief | e }}"{% endif %}>
         <div id="brief-content-{{ loop.index }}"></div>
         <button class="copy-btn" onclick="copyBrief({{ loop.index }})">Copy to clipboard</button>
       </div>
@@ -1028,9 +1096,44 @@ BRIEF_HTML = r"""
 </div>
 
 <script>
+// Pre-render any saved briefs on page load
+document.querySelectorAll('.brief-out[data-saved]').forEach(out => {
+  const text = out.dataset.saved;
+  const content = out.querySelector('[id^="brief-content-"]');
+  if (content && text) {
+    content.innerHTML = parseBriefSections(text);
+    out.classList.add('visible');
+  }
+});
+
 document.querySelectorAll('.brief-btn').forEach(btn => {
   btn.addEventListener('click', () => genBrief(btn));
 });
+
+function parseBriefSections(text) {
+  const sections = [
+    'THE HOOK', 'TALKING POINTS', 'FIRST PRINCIPLES CHECK',
+    'THE BIGGER PICTURE', 'AUDIENCE QUESTIONS', 'TRAPS TO AVOID'
+  ];
+  const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  let html = '';
+  let remaining = text;
+  for (let i = 0; i < sections.length; i++) {
+    const label = sections[i];
+    const nextLabel = sections[i + 1];
+    const start = remaining.indexOf(label);
+    if (start === -1) continue;
+    const bodyStart = start + label.length;
+    const end = nextLabel ? remaining.indexOf(nextLabel, bodyStart) : remaining.length;
+    const body = (end === -1 ? remaining.slice(bodyStart) : remaining.slice(bodyStart, end)).trim();
+    html += `<div class="brief-section">
+      <div class="brief-label">${label}</div>
+      <div class="brief-text">${esc(body)}</div>
+    </div>`;
+    if (end !== -1) remaining = remaining.slice(0, bodyStart) + remaining.slice(end);
+  }
+  return html || `<div class="brief-text">${esc(text)}</div>`;
+}
 
 async function genBrief(btn) {
   const idx  = btn.dataset.idx;
@@ -1049,29 +1152,7 @@ async function genBrief(btn) {
     });
     const data = await res.json();
     const text = data.brief || 'Error generating brief.';
-
-    // Parse sections and render with labels
-    const sections = [
-      'THE HOOK', 'TALKING POINTS', 'FIRST PRINCIPLES CHECK',
-      'THE BIGGER PICTURE', 'AUDIENCE QUESTIONS', 'TRAPS TO AVOID'
-    ];
-    let html = '';
-    let remaining = text;
-    for (let i = 0; i < sections.length; i++) {
-      const label = sections[i];
-      const nextLabel = sections[i + 1];
-      const start = remaining.indexOf(label);
-      if (start === -1) continue;
-      const bodyStart = start + label.length;
-      const end = nextLabel ? remaining.indexOf(nextLabel, bodyStart) : remaining.length;
-      const body = (end === -1 ? remaining.slice(bodyStart) : remaining.slice(bodyStart, end)).trim();
-      html += `<div class="brief-section">
-        <div class="brief-label">${label}</div>
-        <div class="brief-text">${body.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>
-      </div>`;
-      if (end !== -1) remaining = remaining.slice(0, bodyStart) + remaining.slice(end);
-    }
-    content.innerHTML = html || `<div class="brief-text">${text}</div>`;
+    content.innerHTML = parseBriefSections(text);
     out.classList.add('visible');
     btn.textContent = '⚡ Regenerate';
   } catch(e) {
@@ -1097,6 +1178,142 @@ function copyBrief(idx) {
 """
 
 
+SAVED_HTML = r"""
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Saved Briefs · Daily Herald</title>
+  <style>
+    :root {
+      --bg: #0a0d12; --surface: #111720; --surface2: #192030;
+      --border: rgba(255,255,255,.08); --text: #e4ecf5; --muted: #6b85a0;
+      --accent: #c8102e; --gold: #c9a84c; --radius: 12px;
+      --shadow: 0 8px 32px rgba(0,0,0,.6);
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
+           background: var(--bg); color: var(--text); line-height: 1.6; }
+    a { color: var(--gold); text-decoration: none; }
+    .page { max-width: 860px; margin: 0 auto; padding: 24px 16px 60px; }
+    .topbar {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; margin-bottom: 28px;
+      padding-bottom: 18px; border-bottom: 1px solid var(--border);
+    }
+    .brand { font-size: 20px; font-weight: 900; }
+    .brand span { color: var(--accent); }
+    .brand-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+    .back-btn {
+      font-size: 12px; color: var(--text); background: none;
+      border: 1px solid var(--border); border-radius: 8px;
+      padding: 6px 12px; cursor: pointer; text-decoration: none;
+    }
+    .card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 20px 22px; margin-bottom: 16px;
+      box-shadow: var(--shadow);
+    }
+    .card-topic {
+      font-size: 10px; font-weight: 800; text-transform: uppercase;
+      letter-spacing: .08em; color: var(--accent); margin-bottom: 6px;
+    }
+    .card h3 { font-size: 16px; font-weight: 700; line-height: 1.35; margin-bottom: 6px; }
+    .card-meta { font-size: 12px; color: var(--muted); margin-bottom: 16px; }
+    .brief-section { margin-bottom: 16px; }
+    .brief-label {
+      font-size: 10px; font-weight: 800; text-transform: uppercase;
+      letter-spacing: .1em; color: var(--gold); margin-bottom: 5px;
+    }
+    .brief-text { font-size: 14px; line-height: 1.65; white-space: pre-wrap; }
+    .card-footer { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border);
+                   display: flex; gap: 14px; align-items: center; }
+    .source-link { font-size: 12px; color: var(--muted); }
+    .copy-btn {
+      padding: 6px 14px; border-radius: 8px;
+      background: var(--surface2); border: 1px solid var(--border);
+      color: var(--text); font-size: 12px; font-weight: 700; cursor: pointer;
+    }
+    .copy-btn:hover { border-color: var(--gold); }
+    .empty { text-align: center; padding: 80px 20px; color: var(--muted); }
+    .empty strong { color: var(--text); font-size: 18px; display: block; margin-bottom: 8px; }
+  </style>
+</head>
+<body>
+<div class="page">
+  <div class="topbar">
+    <div>
+      <div class="brand">Daily<span>Herald</span> Brief</div>
+      <div class="brand-sub">Saved Briefs · Badlands Media</div>
+    </div>
+    <a class="back-btn" href="/brief">← Back to Stories</a>
+  </div>
+
+  {% if saved %}
+    {% for b in saved %}
+    <div class="card" id="saved-{{ loop.index }}">
+      <div class="card-topic">{{ b.topic }}</div>
+      <h3>{{ b.title }}</h3>
+      <div class="card-meta">
+        {{ b.source }}{% if b.source and b.briefed_at %} · {% endif %}
+        Briefed {{ b.briefed_at }}
+      </div>
+      <div class="brief-body" data-brief="{{ b.saved_brief | e }}"></div>
+      <div class="card-footer">
+        <a class="source-link" href="{{ b.link }}" target="_blank" rel="noopener noreferrer">Read source →</a>
+        <button class="copy-btn" onclick="copyCard({{ loop.index }})">Copy to clipboard</button>
+      </div>
+    </div>
+    {% endfor %}
+  {% else %}
+    <div class="empty">
+      <strong>No saved briefs yet</strong>
+      Generate a brief from the <a href="/brief">stories page</a> and it'll appear here automatically.
+    </div>
+  {% endif %}
+</div>
+
+<script>
+const sections = [
+  'THE HOOK','TALKING POINTS','FIRST PRINCIPLES CHECK',
+  'THE BIGGER PICTURE','AUDIENCE QUESTIONS','TRAPS TO AVOID'
+];
+const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+function parseBriefSections(text) {
+  let html = '', remaining = text;
+  for (let i = 0; i < sections.length; i++) {
+    const label = sections[i], nextLabel = sections[i+1];
+    const start = remaining.indexOf(label);
+    if (start === -1) continue;
+    const bodyStart = start + label.length;
+    const end = nextLabel ? remaining.indexOf(nextLabel, bodyStart) : remaining.length;
+    const body = (end === -1 ? remaining.slice(bodyStart) : remaining.slice(bodyStart, end)).trim();
+    html += `<div class="brief-section"><div class="brief-label">${label}</div><div class="brief-text">${esc(body)}</div></div>`;
+    if (end !== -1) remaining = remaining.slice(0, bodyStart) + remaining.slice(end);
+  }
+  return html || `<div class="brief-text">${esc(text)}</div>`;
+}
+
+document.querySelectorAll('.brief-body[data-brief]').forEach(el => {
+  el.innerHTML = parseBriefSections(el.dataset.brief);
+});
+
+function copyCard(idx) {
+  const el = document.getElementById('saved-' + idx).querySelector('.brief-body');
+  navigator.clipboard.writeText(el.innerText).then(() => {
+    const btn = document.getElementById('saved-' + idx).querySelector('.copy-btn');
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = 'Copy to clipboard', 2000);
+  });
+}
+</script>
+</body>
+</html>
+"""
+
+
 def brief_authed():
     return request.cookies.get("brief_auth") == BRIEF_PASSWORD
 
@@ -1106,6 +1323,7 @@ def brief():
     if request.method == "POST":
         pw = request.form.get("password", "")
         if pw == BRIEF_PASSWORD:
+            ensure_brief_columns()
             resp = make_response(render_template_string(
                 BRIEF_HTML, authed=True, error=False,
                 stories=_brief_stories(request.args.get("topic")),
@@ -1119,12 +1337,47 @@ def brief():
     if not brief_authed():
         return render_template_string(BRIEF_HTML, authed=False, error=False)
 
+    ensure_brief_columns()
     topic = request.args.get("topic", "").strip() or None
     stories = _brief_stories(topic)
     return render_template_string(
         BRIEF_HTML, authed=True, error=False,
         stories=stories, all_topics=ALL_TOPICS, active_topic=topic or "",
     )
+
+
+@app.route("/brief/saved")
+def brief_saved():
+    if not brief_authed():
+        return render_template_string(BRIEF_HTML, authed=False, error=False)
+    ensure_brief_columns()
+    rows = get_saved_briefs()
+    saved = []
+    for r in rows:
+        ts = r.get("briefed_at")
+        time_str = ""
+        if ts:
+            try:
+                if isinstance(ts, str):
+                    dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                elif isinstance(ts, datetime):
+                    dt = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+                else:
+                    dt = None
+                if dt:
+                    cst = pytz.timezone("America/Chicago")
+                    time_str = dt.astimezone(cst).strftime("%b %d, %Y %I:%M %p %Z")
+            except Exception:
+                time_str = str(ts)
+        saved.append({
+            "title": (r.get("title") or "").strip(),
+            "link":  (r.get("link") or "").strip(),
+            "source": (r.get("source") or "").strip(),
+            "topic": (r.get("topic") or "").strip(),
+            "saved_brief": r.get("saved_brief") or "",
+            "briefed_at": time_str,
+        })
+    return render_template_string(SAVED_HTML, saved=saved)
 
 
 @app.post("/brief/logout")
@@ -1138,6 +1391,7 @@ def brief_logout():
 def api_brief():
     if not brief_authed():
         return jsonify({"error": "unauthorized"}), 401
+    ensure_brief_columns()
     data = request.get_json(force=True) or {}
     link = data.get("link", "")
 
@@ -1161,12 +1415,34 @@ def api_brief():
         source=row.get("source", ""),
         link=link,
     )
+
+    # Persist the brief so it shows up on the Saved Briefs page
+    save_brief_to_db(link, brief_text)
+
     return jsonify({"brief": brief_text})
 
 
 def _brief_stories(topic=None):
-    rows = get_stories(limit=30, page=1, topic=topic)
-    return [serialize_story(r) for r in rows]
+    """Load stories for the brief page, including any saved brief text."""
+    tbl = "public.articles" if using_postgres() else "articles"
+    ph  = "%s" if using_postgres() else "?"
+    if topic:
+        rows = fetch_rows(
+            f"SELECT title,link,source,topic,summary,added_at,saved_brief "
+            f"FROM {tbl} WHERE lower(topic)=lower({ph}) ORDER BY added_at DESC LIMIT 30",
+            (topic,)
+        )
+    else:
+        rows = fetch_rows(
+            f"SELECT title,link,source,topic,summary,added_at,saved_brief "
+            f"FROM {tbl} ORDER BY added_at DESC LIMIT 30"
+        )
+    out = []
+    for r in rows:
+        s = serialize_story(r)
+        s["saved_brief"] = r.get("saved_brief") or ""
+        out.append(s)
+    return out
 
 
 if __name__ == "__main__":
