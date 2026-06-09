@@ -402,17 +402,17 @@ BASE_HTML = r"""
        TOKENS
     ════════════════════════════════════════════ */
     :root {
-      --bg:        #07090c;
-      --surface:   #0d1117;
-      --surface2:  #131a22;
-      --surface3:  #1a2333;
+      --bg:        #0b0d0f;
+      --surface:   #111418;
+      --surface2:  #161b20;
+      --surface3:  #1e2530;
       --border:    rgba(255,255,255,.07);
       --border2:   rgba(255,255,255,.12);
-      --text:      #e8edf3;
-      --text2:     #b0bec8;
-      --muted:     #5a7080;
-      --accent:    #cc1a1a;
-      --accent2:   #a81515;
+      --text:      #f0ebe0;
+      --text2:     #b8a898;
+      --muted:     #5a6672;
+      --accent:    #c8972a;
+      --accent2:   #a87a1c;
       --gold:      #c8972a;
       --green:     #16a34a;
       --shadow:    0 4px 20px rgba(0,0,0,.7);
@@ -478,7 +478,7 @@ BASE_HTML = r"""
     .search-form button {
       padding: 8px 14px; background: var(--accent); border: none;
       border-radius: 0 var(--radius) var(--radius) 0;
-      color: #fff; font-weight: 700; font-size: 13px;
+      color: #111; font-weight: 700; font-size: 13px;
       font-family: system-ui; cursor: pointer;
     }
     .theme-btn {
@@ -513,8 +513,8 @@ BASE_HTML = r"""
       padding-left: 100%;
     }
     .ticker-scroll:hover { animation-play-state: paused; }
-    .ticker-item { display: inline; margin-right: 60px; color: #fff; }
-    .ticker-item a { color: #fff; }
+    .ticker-item { display: inline; margin-right: 60px; color: #111; }
+    .ticker-item a { color: #111; }
     .ticker-item a:hover { text-decoration: underline; }
     @keyframes ticker { from { transform: translateX(0); } to { transform: translateX(-100%); } }
 
@@ -577,7 +577,7 @@ BASE_HTML = r"""
     }
     .hero-badges { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; }
     .badge-breaking {
-      background: var(--accent); color: #fff;
+      background: #c8102e; color: #fff;
       font-size: 10px; font-weight: 900; letter-spacing: .12em;
       padding: 3px 8px; border-radius: 3px;
       font-family: system-ui; text-transform: uppercase;
@@ -610,7 +610,7 @@ BASE_HTML = r"""
     .hero-source { font-weight: 700; color: var(--text2); }
     .hero-read {
       display: inline-block; margin-top: 16px;
-      background: var(--accent); color: #fff;
+      background: var(--accent); color: #111;
       padding: 10px 20px; border-radius: var(--radius);
       font-size: 13px; font-weight: 700; font-family: system-ui;
       transition: background .15s; align-self: flex-start;
@@ -627,7 +627,7 @@ BASE_HTML = r"""
     .hero:hover .hero-img img { transform: scale(1.03); }
     .hero-img-placeholder {
       width: 100%; height: 100%; min-height: 280px;
-      background: linear-gradient(135deg, #0d1a2e 0%, #1a0d0d 50%, #0d0d1a 100%);
+      background: linear-gradient(135deg, #111208 0%, #1a1510 50%, #0c0e12 100%);
       display: flex; flex-direction: column; align-items: center; justify-content: center;
       color: var(--muted); gap: 10px;
     }
