@@ -33,51 +33,127 @@ _openai_client = None
 
 # ── Feeds ───────────────────────────────────────────────────────────────────
 FEEDS = [
-    {"name": "BBC",              "url": "http://feeds.bbci.co.uk/news/rss.xml"},
-    {"name": "BBC World",        "url": "http://feeds.bbci.co.uk/news/world/rss.xml"},
-    {"name": "Reuters",          "url": "http://feeds.reuters.com/reuters/topNews"},
-    {"name": "Al Jazeera",       "url": "https://www.aljazeera.com/xml/rss/all.xml"},
-    {"name": "The Guardian",     "url": "https://www.theguardian.com/rss"},
-    {"name": "Just the News",    "url": "https://justthenews.com/rss.xml"},
-    {"name": "CoinDesk",         "url": "https://www.coindesk.com/arc/outboundfeeds/rss/"},
-    {"name": "Jerusalem Post",   "url": "https://www.jpost.com/rss/rssfeedsfrontpage.aspx"},
-    {"name": "RT",               "url": "https://www.rt.com/rss/"},
-    {"name": "Google News",      "url": "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en"},
+    # ── Wire / Mainstream ──
+    {"name": "Reuters",              "url": "https://feeds.reuters.com/reuters/topNews"},
+    {"name": "AP News",              "url": "https://rsshub.app/apnews/topics/apf-topnews"},
+    {"name": "The Hill",             "url": "https://thehill.com/news/feed/"},
+    {"name": "Fox News",             "url": "https://feeds.foxnews.com/foxnews/latest"},
+    {"name": "Fox Politics",         "url": "https://feeds.foxnews.com/foxnews/politics"},
+    {"name": "NY Post",              "url": "https://nypost.com/feed/"},
+    {"name": "Washington Examiner",  "url": "https://www.washingtonexaminer.com/rss/politics-and-policy"},
+    {"name": "Washington Times",     "url": "https://www.washingtontimes.com/rss/headlines/news/politics/"},
+    {"name": "Newsmax",              "url": "https://www.newsmax.com/rss/Politics/16/"},
+    {"name": "Politico",             "url": "https://rss.politico.com/politics-news.xml"},
+    {"name": "Just the News",        "url": "https://justthenews.com/rss.xml"},
+    {"name": "Google News",          "url": "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en"},
+
+    # ── Conservative / Alt Media ──
+    {"name": "Breitbart",            "url": "https://feeds.feedburner.com/breitbart"},
+    {"name": "Daily Wire",           "url": "https://www.dailywire.com/feeds/rss.xml"},
+    {"name": "Epoch Times",          "url": "https://www.theepochtimes.com/c-us/feed"},
+    {"name": "The Federalist",       "url": "https://thefederalist.com/feed/"},
+    {"name": "Zero Hedge",           "url": "https://feeds.feedburner.com/zerohedge/feed"},
+    {"name": "Revolver News",        "url": "https://revolver.news/feed/"},
+    {"name": "Gateway Pundit",       "url": "https://www.thegatewaypundit.com/feed/"},
+    {"name": "PJ Media",             "url": "https://pjmedia.com/feed"},
+    {"name": "American Thinker",     "url": "https://www.americanthinker.com/feeds/rss.xml"},
+    {"name": "The Blaze",            "url": "https://www.theblaze.com/feeds/feed.rss"},
+    {"name": "Townhall",             "url": "https://townhall.com/rss/tipsheet"},
+    {"name": "National Review",      "url": "https://www.nationalreview.com/feed/"},
+    {"name": "CoinDesk",             "url": "https://www.coindesk.com/arc/outboundfeeds/rss/"},
+
+    # ── Legal / Accountability ──
+    {"name": "Judicial Watch",       "url": "https://www.judicialwatch.org/feed/"},
+    {"name": "Conservative Treehouse","url": "https://theconservativetreehouse.com/feed/"},
+
+    # ── International ──
+    {"name": "BBC World",            "url": "http://feeds.bbci.co.uk/news/world/rss.xml"},
+    {"name": "Al Jazeera",           "url": "https://www.aljazeera.com/xml/rss/all.xml"},
+    {"name": "Jerusalem Post",       "url": "https://www.jpost.com/rss/rssfeedsfrontpage.aspx"},
+    {"name": "Times of Israel",      "url": "https://www.timesofisrael.com/feed/"},
+    {"name": "RT",                   "url": "https://www.rt.com/rss/"},
+    {"name": "TASS",                 "url": "https://tass.com/rss/v2.xml"},
+    {"name": "South China Morning Post", "url": "https://www.scmp.com/rss/91/feed"},
+    {"name": "Middle East Eye",      "url": "https://www.middleeasteye.net/rss"},
 ]
 
 # ── Topics ───────────────────────────────────────────────────────────────────
 # key (lowercase, used for matching) -> display label
 # Order matters: first match wins for an article.
 TOPICS = {
+    # ── People / Admin ──
     "trump":            "Trump",
+    "musk":             "Musk / DOGE",
+    "rfk":              "RFK Jr",
+    "epstein":          "Epstein",
+    "pelosi":           "Pelosi",
+    "obama":            "Obama",
+
+    # ── Domestic Politics ──
     "election":         "Election",
-    "bitcoin":          "Bitcoin",
-    "russia":           "Russia",
-    "putin":            "Putin",
-    "israel":           "Israel",
-    "netanyahu":        "Netanyahu",
-    "iran":             "Iran",
-    "china":            "China",
-    "saudi":            "Saudi",
-    "nuclear":          "Nuclear",
+    "doge":             "DOGE",
+    "deep state":       "Deep State",
     "fbi":              "FBI",
+    "cia":              "CIA",
+    "doj":              "DOJ",
+    "dni":              "DNI",
     "executive order":  "Executive Order",
+    "impeach":          "Impeachment",
+    "congress":         "Congress",
+    "senate":           "Senate",
+    "supreme court":    "Supreme Court",
     "injunction":       "Injunction",
     "lawsuit":          "Lawsuit",
     "court":            "Court",
-    "voter":            "Voter",
-    "conspiracy":       "Conspiracy",
-    "corruption":       "Corruption",
-    "qanon":            "QAnon",
-    "ufo":              "UFO",
+    "indictment":       "Indictment",
     "rico":             "RICO",
+    "voter":            "Voter / Election",
+    "censorship":       "Censorship",
+    "corruption":       "Corruption",
+    "whistleblower":    "Whistleblower",
+
+    # ── Policy / Economy ──
+    "tariff":           "Tariffs",
+    "immigration":      "Immigration",
+    "border":           "Border",
+    "inflation":        "Economy",
+    "federal reserve":  "Federal Reserve",
     "maha":             "MAHA",
-    "dni":              "DNI",
+    "pentagon":         "Pentagon / Military",
+    "nato":             "NATO",
+
+    # ── Crypto / Finance ──
+    "bitcoin":          "Bitcoin",
+    "crypto":           "Crypto",
+    "cbdc":             "CBDC",
+
+    # ── International ──
+    "russia":           "Russia",
+    "putin":            "Putin",
+    "ukraine":          "Ukraine",
+    "zelensky":         "Zelensky",
+    "israel":           "Israel",
+    "netanyahu":        "Netanyahu",
+    "gaza":             "Gaza",
+    "iran":             "Iran",
+    "china":            "China",
+    "taiwan":           "Taiwan",
+    "north korea":      "North Korea",
+    "saudi":            "Saudi Arabia",
     "erdogan":          "Erdogan",
     "lavrov":           "Lavrov",
     "congo":            "Congo",
     "sahel":            "Sahel",
+    "brics":            "BRICS",
+
+    # ── Other ──
+    "nuclear":          "Nuclear",
+    "ufo":              "UFO / UAP",
+    "uap":              "UFO / UAP",
+    "qanon":            "QAnon",
+    "conspiracy":       "Conspiracy",
     "board of peace":   "Board of Peace",
+    "devolution":       "Devolution",
 }
 
 

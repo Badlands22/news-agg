@@ -34,10 +34,24 @@ _cache: dict = {}
 
 # ── Topic display labels (keep in sync with collector.py) ────────────────────
 ALL_TOPICS = [
-    "Trump", "Election", "Bitcoin", "Russia", "Putin", "Israel", "Netanyahu",
-    "Iran", "China", "Saudi", "Nuclear", "FBI", "Executive Order", "Injunction",
-    "Lawsuit", "Court", "Voter", "Conspiracy", "Corruption", "QAnon", "UFO",
-    "RICO", "MAHA", "DNI", "Erdogan", "Lavrov", "Congo", "Sahel", "Board of Peace",
+    # People / Admin
+    "Trump", "Musk / DOGE", "RFK Jr", "Epstein", "Pelosi", "Obama",
+    # Domestic Politics
+    "Election", "DOGE", "Deep State", "FBI", "CIA", "DOJ", "DNI",
+    "Executive Order", "Impeachment", "Congress", "Senate", "Supreme Court",
+    "Injunction", "Lawsuit", "Court", "Indictment", "RICO",
+    "Voter / Election", "Censorship", "Corruption", "Whistleblower",
+    # Policy / Economy
+    "Tariffs", "Immigration", "Border", "Economy", "Federal Reserve",
+    "MAHA", "Pentagon / Military", "NATO",
+    # Crypto / Finance
+    "Bitcoin", "Crypto", "CBDC",
+    # International
+    "Russia", "Putin", "Ukraine", "Zelensky", "Israel", "Netanyahu",
+    "Gaza", "Iran", "China", "Taiwan", "North Korea", "Saudi Arabia",
+    "Erdogan", "Lavrov", "Congo", "Sahel", "BRICS",
+    # Other
+    "Nuclear", "UFO / UAP", "QAnon", "Conspiracy", "Board of Peace", "Devolution",
 ]
 
 
