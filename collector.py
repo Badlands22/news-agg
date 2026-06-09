@@ -1,5 +1,6 @@
 import os
 import re
+import gc
 import time
 import html
 import hashlib
@@ -395,6 +396,8 @@ def fallback_summary(title, desc, topic_label):
 
 # ── Feed processing ──────────────────────────────────────────────────────────
 
+MAX_ENTRIES_PER_FEED = 25  # cap to keep memory usage low on free tier
+
 def process_feed(feed_name, url, recent_titles):
     print(f"[{feed_name}] Fetching...")
     try:
@@ -403,7 +406,8 @@ def process_feed(feed_name, url, recent_titles):
         print(f"  [FETCH ERROR] {e}")
         return 0
 
-    entries = getattr(feed, "entries", None) or []
+    entries = (getattr(feed, "entries", None) or [])[:MAX_ENTRIES_PER_FEED]
+    del feed  # release the full parsed feed object immediately
     new_count = 0
 
     for entry in entries:
@@ -469,7 +473,10 @@ def main():
             stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
             print(f"\n─── Cycle: {stamp} ───")
             recent_titles = get_recent_titles(hours=24)
-            total = sum(process_feed(f["name"], f["url"], recent_titles) for f in FEEDS)
+            total = 0
+            for f in FEEDS:
+                total += process_feed(f["name"], f["url"], recent_titles)
+                gc.collect()  # free memory between feeds
             print(f"─── Done. {total} new articles. Next run in {POLL_SECONDS}s ───\n")
             time.sleep(POLL_SECONDS)
         except KeyboardInterrupt:
