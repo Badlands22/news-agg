@@ -849,9 +849,9 @@ def topic_page(topic):
     return render(f"{topic} News", stories, page, active_topic=topic)
 
 
-# ── Daily Herald Brief ────────────────────────────────────────────────────────
+# ── Daily Herold Brief ────────────────────────────────────────────────────────
 
-DAILY_HERALD_PROMPT = """You are a research assistant for Jon Herold (aka Patel Patriot), host of The Daily Herald on Badlands Media's Rumble channel.
+DAILY_HERALD_PROMPT = """You are a research assistant for Jon Herold (aka Patel Patriot), host of The Daily Herold on Badlands Media's Rumble channel.
 
 Jon's analytical framework:
 - The 2020 election was illegitimate — foreign interference and systemic institutional corruption are documented, not theory
@@ -862,7 +862,7 @@ Jon's analytical framework:
 - Avoid both failure modes: blind cheerleading ("everything is 5D chess, trust the plan") and catastrophizing ("this is betrayal, it's over"). Both are intellectually lazy and dishonest
 - Honesty over tribal loyalty — if something cuts against your own side, say so. Jon's audience trusts him because he calls it straight
 
-Generate a Daily Herald podcast brief for the story below. Use exactly this format — plain text, no markdown symbols:
+Generate a Daily Herold podcast brief for the story below. Use exactly this format — plain text, no markdown symbols:
 
 THE HOOK
 [1-2 punchy sentences to open the segment. Frame immediately why this matters to a constitutional, first-principles audience.]
@@ -915,13 +915,62 @@ def generate_brief(title, summary, bullets, topic, source, link):
         return f"Error generating brief: {e}"
 
 
+RELEVANCE_PROMPT = """You score news stories for relevance to The Daily Herold, a daily political commentary show on Badlands Media's Rumble channel, hosted by Jon Herold (Patel Patriot).
+
+The audience cares about:
+- MAJOR breaking news of broad national/international importance (always high value — the audience lives in the real world)
+- Anything related to Trump, his administration, executive actions, and the dismantling of the deep state
+- Devolution theory, continuity of government, military operations, COG signals
+- Deep state exposure: FBI, CIA, DOJ, intelligence community corruption and accountability
+- Election integrity, lawfare, political persecution
+- Epstein/trafficking/elite corruption — stories with real substance and sourcing
+- Geopolitics through a non-neocon lens: Russia/Ukraine, Israel/Gaza, Iran, China
+- Financial system exposure: Federal Reserve, CBDC, crypto, economic warfare
+- Censorship, Big Tech, media manipulation
+- Stories that interest the Q-adjacent community but have actual evidence (not decoder speculation)
+- Constitutional issues, Supreme Court, executive power
+
+Score 1–10 using this scale:
+10 — Major breaking news OR direct Devolution/deep state signal with substance
+8-9 — High relevance to the audience's core interests, real information
+6-7 — Relevant topic, useful context, worth knowing
+4-5 — Tangentially related, mainstream framing, little new info
+1-3 — Junk, clickbait, off-topic, or pure speculation with no substance
+
+Respond with ONLY a single integer 1–10. Nothing else."""
+
+
+def score_relevance(title, summary, topic, source):
+    """Return an integer relevance score 1-10 for the /brief page sort."""
+    if not _brief_client:
+        return 5
+    story = f"Headline: {title}\nTopic: {topic}\nSource: {source}"
+    if summary:
+        story += f"\nSummary: {summary[:300]}"
+    try:
+        resp = _brief_client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": RELEVANCE_PROMPT},
+                {"role": "user", "content": story},
+            ],
+            max_tokens=3,
+            temperature=0,
+        )
+        raw = (resp.choices[0].message.content or "").strip()
+        score = int(re.search(r"\d+", raw).group())
+        return max(1, min(10, score))
+    except Exception:
+        return 5
+
+
 BRIEF_HTML = r"""
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Daily Herald Brief — Badlands Media</title>
+  <title>Daily Herold Brief — Badlands Media</title>
   <style>
     :root {
       --bg: #0a0d12; --surface: #111720; --surface2: #192030;
@@ -1036,7 +1085,7 @@ BRIEF_HTML = r"""
 {% if not authed %}
 <div class="gate">
   <div class="gate-card">
-    <div class="gate-logo">Daily<span>Herald</span></div>
+    <div class="gate-logo">Daily<span>Herold</span></div>
     <div class="gate-sub">Badlands Media · Show Prep Tool</div>
     <form method="post" action="/brief">
       <input class="gate-input" type="password" name="password" placeholder="••••••••" autofocus/>
@@ -1050,7 +1099,7 @@ BRIEF_HTML = r"""
 <div class="page">
   <div class="topbar">
     <div>
-      <div class="brand">Daily<span>Herald</span> Brief</div>
+      <div class="brand">Daily<span>Herold</span> Brief</div>
       <div class="brand-sub">Badlands Media · Show Prep · Private</div>
     </div>
     <div style="display:flex;gap:8px;align-items:center;">
@@ -1072,7 +1121,15 @@ BRIEF_HTML = r"""
   <div id="stories">
     {% for s in stories %}
     <div class="card" id="card-{{ loop.index }}">
-      <div class="card-topic">{{ s.topic }}</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:7px;">
+        <div class="card-topic">{{ s.topic }}</div>
+        <div style="font-size:11px;font-weight:800;padding:2px 8px;border-radius:6px;
+          background:{% if s.relevance >= 8 %}rgba(201,168,76,.2);color:var(--gold)
+                     {% elif s.relevance >= 6 %}rgba(255,255,255,.07);color:var(--muted)
+                     {% else %}rgba(255,255,255,.03);color:#3a4a5a{% endif %};">
+          {{ s.relevance }}/10
+        </div>
+      </div>
       <h3>{{ s.title }}</h3>
       <div class="card-meta">
         {{ s.source }}{% if s.source and s.added_at %} · {% endif %}{{ s.added_at }}
@@ -1198,7 +1255,7 @@ SAVED_HTML = r"""
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>Saved Briefs · Daily Herald</title>
+  <title>Saved Briefs · Daily Herold</title>
   <style>
     :root {
       --bg: #0a0d12; --surface: #111720; --surface2: #192030;
@@ -1258,7 +1315,7 @@ SAVED_HTML = r"""
 <div class="page">
   <div class="topbar">
     <div>
-      <div class="brand">Daily<span>Herald</span> Brief</div>
+      <div class="brand">Daily<span>Herold</span> Brief</div>
       <div class="brand-sub">Saved Briefs · Badlands Media</div>
     </div>
     <a class="back-btn" href="/brief">← Back to Stories</a>
@@ -1437,25 +1494,28 @@ def api_brief():
 
 
 def _brief_stories(topic=None):
-    """Load stories for the brief page, including any saved brief text."""
+    """Load stories for the brief page, score relevance, sort by score."""
     tbl = "public.articles" if using_postgres() else "articles"
     ph  = "%s" if using_postgres() else "?"
     if topic:
         rows = fetch_rows(
             f"SELECT title,link,source,topic,summary,added_at,saved_brief "
-            f"FROM {tbl} WHERE lower(topic)=lower({ph}) ORDER BY added_at DESC LIMIT 30",
+            f"FROM {tbl} WHERE lower(topic)=lower({ph}) ORDER BY added_at DESC LIMIT 40",
             (topic,)
         )
     else:
         rows = fetch_rows(
             f"SELECT title,link,source,topic,summary,added_at,saved_brief "
-            f"FROM {tbl} ORDER BY added_at DESC LIMIT 30"
+            f"FROM {tbl} ORDER BY added_at DESC LIMIT 40"
         )
     out = []
     for r in rows:
         s = serialize_story(r)
         s["saved_brief"] = r.get("saved_brief") or ""
+        s["relevance"] = score_relevance(s["title"], s["summary"], s["topic"], s["source"])
         out.append(s)
+    # Sort: saved briefs stay at original position; unsaved sorted by relevance desc
+    out.sort(key=lambda x: x["relevance"], reverse=True)
     return out
 
 

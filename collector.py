@@ -81,81 +81,89 @@ FEEDS = [
 # ── Topics ───────────────────────────────────────────────────────────────────
 # key (lowercase, used for matching) -> display label
 # Order matters: first match wins for an article.
-TOPICS = {
-    # ── People / Admin ──
+# STRONG topics: match in title OR description (specific enough to be reliable)
+TOPICS_STRONG = {
+    # People
     "trump":            "Trump",
     "musk":             "Musk / DOGE",
     "rfk":              "RFK Jr",
     "epstein":          "Epstein",
     "pelosi":           "Pelosi",
     "obama":            "Obama",
-
-    # ── Domestic Politics ──
-    "election":         "Election",
+    "zelensky":         "Zelensky",
+    "netanyahu":        "Netanyahu",
+    "putin":            "Putin",
+    "erdogan":          "Erdogan",
+    "lavrov":           "Lavrov",
+    # Specific programs / orgs
     "doge":             "DOGE",
     "deep state":       "Deep State",
-    "fbi":              "FBI",
-    "cia":              "CIA",
-    "doj":              "DOJ",
-    "dni":              "DNI",
     "executive order":  "Executive Order",
-    "impeach":          "Impeachment",
-    "congress":         "Congress",
-    "senate":           "Senate",
     "supreme court":    "Supreme Court",
-    "injunction":       "Injunction",
-    "lawsuit":          "Lawsuit",
-    "court":            "Court",
-    "indictment":       "Indictment",
-    "rico":             "RICO",
-    "voter":            "Voter / Election",
-    "censorship":       "Censorship",
-    "corruption":       "Corruption",
-    "whistleblower":    "Whistleblower",
-
-    # ── Policy / Economy ──
-    "tariff":           "Tariffs",
-    "immigration":      "Immigration",
-    "border":           "Border",
-    "inflation":        "Economy",
     "federal reserve":  "Federal Reserve",
-    "maha":             "MAHA",
-    "pentagon":         "Pentagon / Military",
-    "nato":             "NATO",
-
-    # ── Crypto / Finance ──
-    "bitcoin":          "Bitcoin",
-    "crypto":           "Crypto",
-    "cbdc":             "CBDC",
-
-    # ── International ──
+    "devolution":       "Devolution",
+    "continuity of government": "Devolution",
+    "martial law":      "Deep State",
+    "gitmo":            "Deep State",
+    "guantanamo":       "Deep State",
+    "trafficking":      "Trafficking",
+    "pedophile":        "Trafficking",
+    "child exploitation": "Trafficking",
+    "qanon":            "QAnon",
+    "board of peace":   "Board of Peace",
+    # Specific countries / regions (distinctive enough)
     "russia":           "Russia",
-    "putin":            "Putin",
     "ukraine":          "Ukraine",
-    "zelensky":         "Zelensky",
     "israel":           "Israel",
-    "netanyahu":        "Netanyahu",
     "gaza":             "Gaza",
     "iran":             "Iran",
     "china":            "China",
     "taiwan":           "Taiwan",
     "north korea":      "North Korea",
     "saudi":            "Saudi Arabia",
-    "erdogan":          "Erdogan",
-    "lavrov":           "Lavrov",
     "congo":            "Congo",
     "sahel":            "Sahel",
     "brics":            "BRICS",
-
-    # ── Other ──
+    # Finance / tech
+    "bitcoin":          "Bitcoin",
+    "crypto":           "Crypto",
+    "cbdc":             "CBDC",
+    # Policy
+    "tariff":           "Tariffs",
+    "nato":             "NATO",
     "nuclear":          "Nuclear",
     "ufo":              "UFO / UAP",
     "uap":              "UFO / UAP",
-    "qanon":            "QAnon",
-    "conspiracy":       "Conspiracy",
-    "board of peace":   "Board of Peace",
-    "devolution":       "Devolution",
+    "maha":             "MAHA",
+    "rico":             "RICO",
+    "indictment":       "Indictment",
+    "whistleblower":    "Whistleblower",
+    "censorship":       "Censorship",
 }
+
+# BROAD topics: must appear in TITLE only (too generic to match descriptions)
+TOPICS_TITLE_ONLY = {
+    "fbi":              "FBI",
+    "cia":              "CIA",
+    "doj":              "DOJ",
+    "dni":              "DNI",
+    "election":         "Election",
+    "voter":            "Voter / Election",
+    "impeach":          "Impeachment",
+    "congress":         "Congress",
+    "senate":           "Senate",
+    "injunction":       "Injunction",
+    "lawsuit":          "Lawsuit",
+    "corruption":       "Corruption",
+    "immigration":      "Immigration",
+    "border":           "Border",
+    "inflation":        "Economy",
+    "pentagon":         "Pentagon / Military",
+    "conspiracy":       "Conspiracy",
+}
+
+# Combined for display/UI — order doesn't matter here
+TOPICS = {**TOPICS_STRONG, **TOPICS_TITLE_ONLY}
 
 
 # ── DB helpers ───────────────────────────────────────────────────────────────
@@ -287,12 +295,23 @@ def is_duplicate_title(new_title, recent_titles):
 
 
 def find_topic(title, desc):
-    """Return the FIRST matching topic key. One article = one topic."""
+    """Return the FIRST matching topic label. One article = one topic.
+    Strong keywords match title or description.
+    Broad/generic keywords must appear in the title to avoid junk matches.
+    """
     norm_title = normalize_for_compare(title)
-    norm_desc = clean_text(desc or "").lower()
-    for key in TOPICS:
+    norm_desc  = clean_text(desc or "").lower()
+
+    # Strong keywords: title or description
+    for key, label in TOPICS_STRONG.items():
         if key in norm_title or key in norm_desc:
-            return key
+            return label
+
+    # Broad keywords: title only
+    for key, label in TOPICS_TITLE_ONLY.items():
+        if key in norm_title:
+            return label
+
     return None
 
 
