@@ -54,6 +54,13 @@ ALL_TOPICS = [
     "Nuclear", "UFO / UAP", "QAnon", "Conspiracy", "Board of Peace", "Devolution",
 ]
 
+# Curated shortlist shown in the sticky nav bar — keep this to ~15 max
+NAV_TOPICS = [
+    "Trump", "Election", "Deep State", "FBI", "DOJ",
+    "Russia", "Ukraine", "Israel", "Gaza", "China",
+    "Immigration", "Economy", "Bitcoin", "UFO / UAP", "Devolution",
+]
+
 
 # ── Cache helpers ─────────────────────────────────────────────────────────────
 
@@ -371,8 +378,8 @@ def serialize_story(s):
         "bullets":    parsed["bullets"],
         "added_at":   time_ago(dt_utc),
         "image_url":  img,
-        "is_breaking": age_mins < 120,
-        "is_new":      age_mins < 360,
+        "is_breaking": age_mins < 20,   # only truly fresh stories
+        "is_new":      age_mins < 90,   # under 90 min gets a subtle "new" dot
     }
 
 
@@ -515,20 +522,29 @@ BASE_HTML = r"""
     .topic-nav {
       background: var(--surface2);
       border-bottom: 1px solid var(--border);
+      position: relative;
+    }
+    .topic-nav::after {
+      content: '';
+      position: absolute; right: 0; top: 0; bottom: 0; width: 60px;
+      background: linear-gradient(to right, transparent, var(--surface2));
+      pointer-events: none;
+    }
+    .topic-nav-scroll {
       overflow-x: auto; scrollbar-width: none;
     }
-    .topic-nav::-webkit-scrollbar { display: none; }
+    .topic-nav-scroll::-webkit-scrollbar { display: none; }
     .topic-nav-inner {
       max-width: 1280px; margin: 0 auto;
       padding: 0 20px;
-      display: flex; gap: 2px;
+      display: flex; gap: 0; width: max-content; min-width: 100%;
     }
     .tnav-pill {
-      padding: 9px 14px; font-size: 12px; font-weight: 700;
+      padding: 10px 16px; font-size: 12px; font-weight: 700;
       font-family: system-ui; letter-spacing: .03em;
       color: var(--muted); white-space: nowrap;
       border-bottom: 3px solid transparent;
-      transition: color .15s, border-color .15s;
+      transition: color .15s, border-color .15s; flex-shrink: 0;
     }
     .tnav-pill:hover { color: var(--text); }
     .tnav-pill.active { color: var(--accent); border-bottom-color: var(--accent); }
@@ -611,10 +627,11 @@ BASE_HTML = r"""
     .hero:hover .hero-img img { transform: scale(1.03); }
     .hero-img-placeholder {
       width: 100%; height: 100%; min-height: 280px;
-      background: linear-gradient(135deg, var(--surface2) 0%, var(--surface3) 100%);
-      display: flex; align-items: center; justify-content: center;
-      color: var(--muted); font-size: 40px;
+      background: linear-gradient(135deg, #0d1a2e 0%, #1a0d0d 50%, #0d0d1a 100%);
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      color: var(--muted); gap: 10px;
     }
+    .hero-img-placeholder span { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; font-family: system-ui; }
 
     /* ════════════════════════════════════════════
        AD BANNER
@@ -664,13 +681,13 @@ BASE_HTML = r"""
       border-radius: var(--radius);
       overflow: hidden;
       display: flex; flex-direction: column;
-      transition: border-color .15s, transform .15s, box-shadow .15s;
-      box-shadow: var(--shadow);
+      transition: border-color .2s, transform .2s, box-shadow .2s;
+      box-shadow: 0 2px 10px rgba(0,0,0,.4);
     }
     .card:hover {
-      border-color: var(--border2);
-      transform: translateY(-2px);
-      box-shadow: 0 8px 28px rgba(0,0,0,.5);
+      border-color: rgba(255,255,255,.18);
+      transform: translateY(-3px);
+      box-shadow: 0 10px 30px rgba(0,0,0,.55);
     }
 
     /* card image */
@@ -680,22 +697,47 @@ BASE_HTML = r"""
     }
     .card-img img {
       width: 100%; height: 100%; object-fit: cover; display: block;
-      transition: transform .35s;
+      transition: transform .4s;
     }
     .card:hover .card-img img { transform: scale(1.05); }
 
+    /* no-image card gets a colored left accent bar */
+    .card.no-img { border-left: 3px solid var(--accent); }
+    .card.no-img.tc-blue  { border-left-color: #3b82f6; }
+    .card.no-img.tc-purple{ border-left-color: #8b5cf6; }
+    .card.no-img.tc-orange{ border-left-color: #f97316; }
+    .card.no-img.tc-green { border-left-color: #22c55e; }
+    .card.no-img.tc-steel { border-left-color: #64748b; }
+    .card.no-img.tc-sky   { border-left-color: #38bdf8; }
+    .card.no-img.tc-pink  { border-left-color: #e879f9; }
+
     /* card body */
-    .card-body { padding: 14px 15px 16px; display: flex; flex-direction: column; flex: 1; }
-    .card-badges { display: flex; gap: 6px; align-items: center; margin-bottom: 9px; flex-wrap: wrap; }
+    .card-body { padding: 14px 15px 15px; display: flex; flex-direction: column; flex: 1; }
+
+    /* topic badge only — no breaking badge on cards */
+    .card-topic-badge {
+      display: inline-block; margin-bottom: 9px;
+      font-size: 10px; font-weight: 800; letter-spacing: .1em;
+      text-transform: uppercase; font-family: system-ui;
+    }
+    /* new dot — subtle indicator for fresh stories */
+    .new-dot {
+      display: inline-block; width: 7px; height: 7px;
+      border-radius: 50%; background: var(--green);
+      margin-left: 6px; vertical-align: middle;
+      flex-shrink: 0;
+    }
+
     .card h2 {
-      font-size: 15px; font-weight: 700; line-height: 1.35;
+      font-size: 15px; font-weight: 700; line-height: 1.38;
       margin-bottom: 8px; color: var(--text);
     }
     .card h2 a:hover { color: var(--accent); }
     .card-summary {
-      font-size: 13px; color: var(--text2); line-height: 1.5;
+      font-size: 13px; color: var(--text2); line-height: 1.52;
       margin-bottom: 10px; flex: 1;
       display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+      font-family: system-ui;
     }
     .card-meta {
       font-size: 11px; color: var(--muted); font-family: system-ui;
@@ -818,14 +860,16 @@ BASE_HTML = r"""
   </div>
   {% endif %}
 
-  <!-- Topic nav -->
+  <!-- Topic nav — curated shortlist only -->
   <nav class="topic-nav">
-    <div class="topic-nav-inner">
-      <a class="tnav-pill {% if not active_topic %}active{% endif %}" href="{{ url_for('home') }}">All</a>
-      {% for t in all_topics %}
-        <a class="tnav-pill {% if active_topic and active_topic|lower == t|lower %}active{% endif %}"
-           href="{{ url_for('topic_page', topic=t) }}">{{ t }}</a>
-      {% endfor %}
+    <div class="topic-nav-scroll">
+      <div class="topic-nav-inner">
+        <a class="tnav-pill {% if not active_topic %}active{% endif %}" href="{{ url_for('home') }}">All</a>
+        {% for t in nav_topics %}
+          <a class="tnav-pill {% if active_topic and active_topic|lower == t|lower %}active{% endif %}"
+             href="{{ url_for('topic_page', topic=t) }}">{{ t }}</a>
+        {% endfor %}
+      </div>
     </div>
   </nav>
 </header>
@@ -858,7 +902,10 @@ BASE_HTML = r"""
       {% if hero.image_url %}
         <img src="{{ hero.image_url }}" alt="{{ hero.title }}" loading="eager"/>
       {% else %}
-        <div class="hero-img-placeholder">📰</div>
+        <div class="hero-img-placeholder">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity=".3"><path d="M4 4h16v16H4zM4 9h16M9 9v11"/></svg>
+          <span>No image available</span>
+        </div>
       {% endif %}
     </div>
   </section>
@@ -882,19 +929,31 @@ BASE_HTML = r"""
       <div class="story-grid" id="stories">
         {% if stories %}
           {% for s in stories %}
-          <article class="card">
+          {% set tc = '' %}
+          {% if s.topic %}
+            {% set tl = s.topic|lower %}
+            {% if 'russia' in tl or 'ukraine' in tl or 'nato' in tl or 'putin' in tl or 'zelensky' in tl or 'brics' in tl %}{% set tc = 'tc-blue' %}
+            {% elif 'israel' in tl or 'gaza' in tl or 'iran' in tl or 'netanyahu' in tl or 'saudi' in tl %}{% set tc = 'tc-purple' %}
+            {% elif 'china' in tl or 'taiwan' in tl or 'korea' in tl %}{% set tc = 'tc-orange' %}
+            {% elif 'bitcoin' in tl or 'crypto' in tl or 'cbdc' in tl or 'economy' in tl or 'federal' in tl %}{% set tc = 'tc-green' %}
+            {% elif 'military' in tl or 'pentagon' in tl %}{% set tc = 'tc-steel' %}
+            {% elif 'musk' in tl or 'doge' in tl %}{% set tc = 'tc-sky' %}
+            {% elif 'ufo' in tl or 'uap' in tl %}{% set tc = 'tc-pink' %}
+            {% endif %}
+          {% endif %}
+          <article class="card {% if not s.image_url %}no-img {{ tc }}{% endif %}">
             {% if s.image_url %}
             <div class="card-img">
               <img src="{{ s.image_url }}" alt="{{ s.title }}" loading="lazy"/>
             </div>
             {% endif %}
             <div class="card-body">
-              <div class="card-badges">
-                {% if s.is_breaking %}<span class="badge-breaking">Breaking</span>
-                {% elif s.is_new %}<span class="badge-new">New</span>{% endif %}
+              <div style="display:flex;align-items:center;gap:6px;margin-bottom:9px;">
                 {% if s.topic %}
-                <span class="badge-topic {{ ('t-' + s.topic|lower|replace(' / ','_')|replace(' ','-')|replace('/','')) if s.topic else '' }}">{{ s.topic }}</span>
+                <span class="card-topic-badge {{ ('t-' + s.topic|lower|replace(' / ','_')|replace(' ','-')|replace('/','')) }}">{{ s.topic }}</span>
                 {% endif %}
+                {% if s.is_breaking %}<span class="badge-breaking" style="font-size:9px;padding:2px 6px;">Breaking</span>
+                {% elif s.is_new %}<span class="new-dot" title="Recent"></span>{% endif %}
               </div>
               <h2><a href="{{ s.link }}" target="_blank" rel="noopener noreferrer">{{ s.title }}</a></h2>
               {% if s.summary %}
@@ -970,24 +1029,39 @@ BASE_HTML = r"""
   // ── Topic CSS class ──
   const topicClass = t => t ? 't-' + t.toLowerCase().replace(/ \/ /g,'_').replace(/ /g,'-').replace(/\//g,'') : '';
 
+  // ── Topic color class ──
+  function tcClass(topic) {
+    const t = (topic||'').toLowerCase();
+    if (/russia|ukraine|nato|putin|zelensky|brics/.test(t)) return 'tc-blue';
+    if (/israel|gaza|iran|netanyahu|saudi/.test(t)) return 'tc-purple';
+    if (/china|taiwan|korea/.test(t)) return 'tc-orange';
+    if (/bitcoin|crypto|cbdc|economy|federal/.test(t)) return 'tc-green';
+    if (/military|pentagon/.test(t)) return 'tc-steel';
+    if (/musk|doge/.test(t)) return 'tc-sky';
+    if (/ufo|uap/.test(t)) return 'tc-pink';
+    return '';
+  }
+
   // ── Render card from API JSON ──
   function renderCard(s) {
-    const imgHtml = s.image_url
+    const hasImg = !!s.image_url;
+    const imgHtml = hasImg
       ? `<div class="card-img"><img src="${esc(s.image_url)}" alt="${esc(s.title)}" loading="lazy"/></div>`
       : '';
-    const breakBadge = s.is_breaking
-      ? '<span class="badge-breaking">Breaking</span>'
-      : (s.is_new ? '<span class="badge-new">New</span>' : '');
+    const newDot = s.is_breaking
+      ? '<span class="badge-breaking" style="font-size:9px;padding:2px 6px;">Breaking</span>'
+      : (s.is_new ? '<span class="new-dot" title="Recent"></span>' : '');
     const topicBadge = s.topic
-      ? `<span class="badge-topic ${topicClass(s.topic)}">${esc(s.topic)}</span>`
+      ? `<span class="card-topic-badge ${topicClass(s.topic)}">${esc(s.topic)}</span>`
       : '';
     const summaryHtml = s.summary
       ? `<div class="card-summary">${esc(s.summary)}</div>`
       : '';
-    return `<article class="card">
+    const noImgClass = hasImg ? '' : `no-img ${tcClass(s.topic)}`;
+    return `<article class="card ${noImgClass}">
       ${imgHtml}
       <div class="card-body">
-        <div class="card-badges">${breakBadge}${topicBadge}</div>
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:9px;">${topicBadge}${newDot}</div>
         <h2><a href="${esc(s.link)}" target="_blank" rel="noopener noreferrer">${esc(s.title)}</a></h2>
         ${summaryHtml}
         <div class="card-meta">
@@ -1052,6 +1126,7 @@ def render(heading, stories, page, active_topic=None, q=""):
         active_topic=active_topic,
         q=q,
         all_topics=ALL_TOPICS,
+        nav_topics=NAV_TOPICS,
         total_topics=len(ALL_TOPICS),
         feed_count=35,
         last_updated=get_latest_update(),
