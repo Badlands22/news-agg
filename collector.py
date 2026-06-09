@@ -199,12 +199,14 @@ def init_db():
                         topic       TEXT,
                         summary     TEXT,
                         added_at    TIMESTAMPTZ,
-                        fingerprint TEXT UNIQUE
+                        fingerprint TEXT UNIQUE,
+                        image_url   TEXT
                     );
                 """)
                 # Add new columns to existing tables without breaking old installs
                 c.execute("ALTER TABLE public.articles ADD COLUMN IF NOT EXISTS source TEXT;")
                 c.execute("ALTER TABLE public.articles ADD COLUMN IF NOT EXISTS fingerprint TEXT;")
+                c.execute("ALTER TABLE public.articles ADD COLUMN IF NOT EXISTS image_url TEXT;")
                 c.execute("CREATE UNIQUE INDEX IF NOT EXISTS articles_fingerprint_uniq ON public.articles (fingerprint);")
                 c.execute("CREATE INDEX IF NOT EXISTS articles_added_at_idx ON public.articles (added_at DESC);")
                 c.execute("CREATE INDEX IF NOT EXISTS articles_topic_idx ON public.articles (topic, added_at DESC);")
@@ -222,7 +224,8 @@ def init_db():
                 topic       TEXT,
                 summary     TEXT,
                 added_at    TEXT,
-                fingerprint TEXT UNIQUE
+                fingerprint TEXT UNIQUE,
+                image_url   TEXT
             );
         """)
         # Add 'source' column if upgrading from old schema
@@ -237,6 +240,34 @@ def init_db():
 
 
 # ── Text utilities ───────────────────────────────────────────────────────────
+
+def extract_image(entry):
+    """Pull the best image URL out of an RSS entry."""
+    # media:content
+    for m in getattr(entry, "media_content", []) or []:
+        url = m.get("url", "")
+        if url and m.get("medium") in ("image", None):
+            if re.search(r"\.(jpg|jpeg|png|webp|gif)", url, re.I):
+                return url
+    # media:thumbnail
+    for m in getattr(entry, "media_thumbnail", []) or []:
+        url = m.get("url", "")
+        if url:
+            return url
+    # enclosures
+    for enc in getattr(entry, "enclosures", []) or []:
+        if (enc.get("type", "").startswith("image/") or
+                re.search(r"\.(jpg|jpeg|png|webp)", enc.get("url", ""), re.I)):
+            return enc.get("url", "") or ""
+    # first <img> in description HTML
+    desc = entry.get("description") or entry.get("summary") or ""
+    m = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', desc, re.I)
+    if m:
+        url = m.group(1)
+        if url.startswith("http"):
+            return url
+    return ""
+
 
 def clean_text(text):
     if not text:
@@ -317,27 +348,27 @@ def find_topic(title, desc):
 
 # ── DB writes ────────────────────────────────────────────────────────────────
 
-def insert_article(title, link, source, desc, pub_date, topic_label, fingerprint):
+def insert_article(title, link, source, desc, pub_date, topic_label, fingerprint, image_url=""):
     added_at = datetime.now(timezone.utc)
     if using_postgres():
         with pg_connect() as conn:
             with conn.cursor() as c:
                 c.execute("""
                     INSERT INTO public.articles
-                        (title, link, source, description, pub_date, topic, summary, added_at, fingerprint)
-                    VALUES (%s, %s, %s, %s, %s, %s, NULL, %s, %s)
+                        (title, link, source, description, pub_date, topic, summary, added_at, fingerprint, image_url)
+                    VALUES (%s, %s, %s, %s, %s, %s, NULL, %s, %s, %s)
                     ON CONFLICT DO NOTHING
                     RETURNING id;
-                """, (title, link, source, desc, pub_date, topic_label, added_at, fingerprint))
+                """, (title, link, source, desc, pub_date, topic_label, added_at, fingerprint, image_url or None))
                 row = c.fetchone()
                 return row[0] if row else None
     conn = sqlite_connect()
     cur = conn.cursor()
     cur.execute("""
         INSERT OR IGNORE INTO articles
-            (title, link, source, description, pub_date, topic, summary, added_at, fingerprint)
-        VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?);
-    """, (title, link, source, desc, pub_date, topic_label, added_at.isoformat(), fingerprint))
+            (title, link, source, description, pub_date, topic, summary, added_at, fingerprint, image_url)
+        VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?);
+    """, (title, link, source, desc, pub_date, topic_label, added_at.isoformat(), fingerprint, image_url or None))
     conn.commit()
     new_id = cur.lastrowid if cur.rowcount == 1 else None
     conn.close()
@@ -440,8 +471,8 @@ def process_feed(feed_name, url, recent_titles):
                 continue
 
             # One topic per article — first match wins
-            topic_key = find_topic(title, desc)
-            if not topic_key:
+            topic_label = find_topic(title, desc)
+            if not topic_label:
                 continue
 
             # Primary dedup: URL fingerprint (same article from two feeds = one row)
@@ -451,8 +482,8 @@ def process_feed(feed_name, url, recent_titles):
             if is_duplicate_title(title, recent_titles):
                 continue
 
-            topic_label = TOPICS[topic_key]
-            new_id = insert_article(title, link, feed_name, desc, pub_date, topic_label, fp)
+            image_url = extract_image(entry)
+            new_id = insert_article(title, link, feed_name, desc, pub_date, topic_label, fp, image_url)
 
             if not new_id:
                 # URL already in DB — still register title so this cycle's similarity check works
@@ -464,6 +495,7 @@ def process_feed(feed_name, url, recent_titles):
 
             print(f"  [NEW] ({topic_label}) {title[:72]}")
             summary = ai_summary(title, desc, feed_name, topic_label) or fallback_summary(title, desc, topic_label)
+
             update_summary(new_id, summary)
             new_count += 1
 

@@ -146,15 +146,15 @@ def get_stories(limit=PAGE_SIZE, page=1, search=None, topic=None):
         ph = "?"
 
     if topic:
-        q = f"SELECT title,link,source,topic,summary,added_at FROM {tbl} WHERE lower(topic)=lower({ph}) ORDER BY added_at DESC LIMIT {ph} OFFSET {ph}"
+        q = f"SELECT title,link,source,topic,summary,added_at,image_url FROM {tbl} WHERE lower(topic)=lower({ph}) ORDER BY added_at DESC LIMIT {ph} OFFSET {ph}"
         rows = fetch_rows(q, (topic, limit, offset))
     elif search:
         term = f"%{search}%"
         like = "ILIKE" if using_postgres() else "LIKE"
-        q = f"SELECT title,link,source,topic,summary,added_at FROM {tbl} WHERE title {like} {ph} OR topic {like} {ph} OR summary {like} {ph} ORDER BY added_at DESC LIMIT {ph} OFFSET {ph}"
+        q = f"SELECT title,link,source,topic,summary,added_at,image_url FROM {tbl} WHERE title {like} {ph} OR topic {like} {ph} OR summary {like} {ph} ORDER BY added_at DESC LIMIT {ph} OFFSET {ph}"
         rows = fetch_rows(q, (term, term, term, limit, offset))
     else:
-        q = f"SELECT title,link,source,topic,summary,added_at FROM {tbl} ORDER BY added_at DESC LIMIT {ph} OFFSET {ph}"
+        q = f"SELECT title,link,source,topic,summary,added_at,image_url FROM {tbl} ORDER BY added_at DESC LIMIT {ph} OFFSET {ph}"
         rows = fetch_rows(q, (limit, offset))
 
     _cache_set(ck, rows)
@@ -196,6 +196,30 @@ def get_article_counts():
 
 
 # ── Brief DB helpers ──────────────────────────────────────────────────────────
+
+_image_col_ensured = False
+
+def ensure_image_column():
+    global _image_col_ensured
+    if _image_col_ensured:
+        return
+    try:
+        if using_postgres():
+            with pg_connect() as conn:
+                with conn.cursor() as c:
+                    c.execute("ALTER TABLE public.articles ADD COLUMN IF NOT EXISTS image_url TEXT;")
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            try:
+                conn.execute("ALTER TABLE articles ADD COLUMN image_url TEXT;")
+            except Exception:
+                pass
+            conn.commit()
+            conn.close()
+    except Exception as e:
+        print(f"[DB migrate image_url] {e}")
+    _image_col_ensured = True
+
 
 _brief_cols_ensured = False
 
@@ -298,36 +322,57 @@ def parse_summary(text):
     return {"summary": summary_text, "bullets": bullets[:3]}
 
 
-def serialize_story(s):
-    ts = s.get("added_at")
-    time_str = ""
-    if ts:
-        try:
-            if isinstance(ts, str):
-                dt_utc = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            elif isinstance(ts, datetime):
-                dt_utc = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
-            else:
-                dt_utc = None
-            if dt_utc:
-                cst = pytz.timezone("America/Chicago")
-                dt_local = dt_utc.astimezone(cst)
-                time_str = dt_local.strftime("%b %d, %Y %I:%M %p %Z")
-        except Exception:
-            time_str = str(ts)
+def _parse_dt(ts):
+    """Parse a timestamp value into a UTC-aware datetime, or None."""
+    if not ts:
+        return None
+    try:
+        if isinstance(ts, datetime):
+            return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except Exception:
+        return None
 
-    topic = (s.get("topic") or "").strip()
-    summary_raw = s.get("summary") or ""
-    parsed = parse_summary(summary_raw)
+
+def time_ago(dt_utc):
+    """Return a human-friendly relative time string."""
+    if not dt_utc:
+        return ""
+    now = datetime.now(timezone.utc)
+    diff = now - dt_utc
+    mins = int(diff.total_seconds() / 60)
+    if mins < 1:
+        return "just now"
+    if mins < 60:
+        return f"{mins}m ago"
+    hours = mins // 60
+    if hours < 24:
+        return f"{hours}h ago"
+    days = hours // 24
+    if days < 7:
+        return f"{days}d ago"
+    cst = pytz.timezone("America/Chicago")
+    return dt_utc.astimezone(cst).strftime("%b %d")
+
+
+def serialize_story(s):
+    dt_utc   = _parse_dt(s.get("added_at"))
+    topic    = (s.get("topic") or "").strip()
+    parsed   = parse_summary(s.get("summary") or "")
+    img      = (s.get("image_url") or "").strip()
+    age_mins = int((datetime.now(timezone.utc) - dt_utc).total_seconds() / 60) if dt_utc else 9999
 
     return {
-        "title":   (s.get("title") or "").strip(),
-        "link":    (s.get("link") or "").strip(),
-        "source":  (s.get("source") or "").strip(),
-        "topic":   topic,
-        "summary": parsed["summary"],
-        "bullets": parsed["bullets"],
-        "added_at": time_str,
+        "title":      (s.get("title") or "").strip(),
+        "link":       (s.get("link") or "").strip(),
+        "source":     (s.get("source") or "").strip(),
+        "topic":      topic,
+        "summary":    parsed["summary"],
+        "bullets":    parsed["bullets"],
+        "added_at":   time_ago(dt_utc),
+        "image_url":  img,
+        "is_breaking": age_mins < 120,
+        "is_new":      age_mins < 360,
     }
 
 
@@ -340,319 +385,533 @@ BASE_HTML = r"""
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>{{ page_title }}</title>
+  <meta name="description" content="Breaking news aggregator tracking the stories that matter."/>
 
   <!-- Google AdSense — replace ca-pub-XXXXXXXXXXXXXXXX with your publisher ID -->
   <!-- <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-XXXXXXXXXXXXXXXX" crossorigin="anonymous"></script> -->
 
   <style>
-    /* ── Tokens ── */
+    /* ════════════════════════════════════════════
+       TOKENS
+    ════════════════════════════════════════════ */
     :root {
-      --bg:        #0c1117;
-      --surface:   #131b24;
-      --surface2:  #1a2535;
-      --border:    rgba(255,255,255,.09);
-      --text:      #e4ecf5;
-      --muted:     #7a93ad;
-      --accent:    #e63946;
-      --accent2:   #c1121f;
-      --blue:      #6fa8dc;
-      --pill-bg:   rgba(255,255,255,.05);
-      --shadow:    0 8px 32px rgba(0,0,0,.5);
-      --radius:    14px;
+      --bg:        #07090c;
+      --surface:   #0d1117;
+      --surface2:  #131a22;
+      --surface3:  #1a2333;
+      --border:    rgba(255,255,255,.07);
+      --border2:   rgba(255,255,255,.12);
+      --text:      #e8edf3;
+      --text2:     #b0bec8;
+      --muted:     #5a7080;
+      --accent:    #cc1a1a;
+      --accent2:   #a81515;
+      --gold:      #c8972a;
+      --green:     #16a34a;
+      --shadow:    0 4px 20px rgba(0,0,0,.7);
+      --radius:    8px;
     }
     body.light {
-      --bg:        #f0f2f5;
+      --bg:        #f4f5f7;
       --surface:   #ffffff;
-      --surface2:  #f8f9fa;
-      --border:    rgba(0,0,0,.10);
-      --text:      #1a202c;
-      --muted:     #64748b;
-      --blue:      #1d4ed8;
-      --pill-bg:   rgba(0,0,0,.05);
-      --shadow:    0 4px 20px rgba(0,0,0,.12);
+      --surface2:  #f0f2f5;
+      --surface3:  #e8eaed;
+      --border:    rgba(0,0,0,.09);
+      --border2:   rgba(0,0,0,.15);
+      --text:      #111827;
+      --text2:     #374151;
+      --muted:     #6b7280;
+      --shadow:    0 2px 12px rgba(0,0,0,.1);
     }
 
-    /* ── Reset ── */
+    /* ════════════════════════════════════════════
+       RESET + BASE
+    ════════════════════════════════════════════ */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
     body {
-      font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+      font-family: "Georgia", "Times New Roman", serif;
       background: var(--bg);
       color: var(--text);
-      line-height: 1.55;
-      transition: background .25s, color .25s;
+      line-height: 1.5;
     }
-    a { color: var(--blue); text-decoration: none; }
-    a:hover { text-decoration: underline; }
+    a { color: inherit; text-decoration: none; }
 
-    /* ── Layout ── */
-    .page { max-width: 1160px; margin: 0 auto; padding: 20px 16px 60px; }
-    .grid { display: grid; grid-template-columns: 1fr 280px; gap: 24px; align-items: start; }
-    @media (max-width: 820px) { .grid { grid-template-columns: 1fr; } .sidebar { display: none; } }
-
-    /* ── Header ── */
-    .header {
+    /* ════════════════════════════════════════════
+       MASTHEAD
+    ════════════════════════════════════════════ */
+    .masthead {
       background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 20px 22px 18px;
-      margin-bottom: 20px;
-      box-shadow: var(--shadow);
+      border-bottom: 3px solid var(--accent);
+      position: sticky; top: 0; z-index: 100;
+      box-shadow: 0 2px 16px rgba(0,0,0,.6);
     }
-    .header-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
-    .site-name { font-size: 26px; font-weight: 800; letter-spacing: -.5px; }
-    .site-name span { color: var(--accent); }
-    .header-meta { font-size: 12px; color: var(--muted); margin-top: 4px; }
+    .masthead-top {
+      max-width: 1280px; margin: 0 auto;
+      padding: 12px 20px 10px;
+      display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    }
+    .site-name {
+      font-size: 32px; font-weight: 900; letter-spacing: -1px;
+      font-family: system-ui, -apple-system, sans-serif;
+      line-height: 1;
+    }
+    .site-name em { color: var(--accent); font-style: normal; }
+    .masthead-tagline { font-size: 11px; color: var(--muted); margin-top: 3px;
+      font-family: system-ui; letter-spacing: .04em; text-transform: uppercase; }
+    .masthead-right { display: flex; align-items: center; gap: 10px; }
+    .search-form { display: flex; gap: 0; }
+    .search-form input {
+      padding: 8px 14px; font-size: 13px; font-family: system-ui;
+      background: var(--surface2); border: 1px solid var(--border2);
+      border-right: none; border-radius: var(--radius) 0 0 var(--radius);
+      color: var(--text); outline: none; width: 200px;
+    }
+    .search-form input:focus { border-color: var(--accent); }
+    .search-form button {
+      padding: 8px 14px; background: var(--accent); border: none;
+      border-radius: 0 var(--radius) var(--radius) 0;
+      color: #fff; font-weight: 700; font-size: 13px;
+      font-family: system-ui; cursor: pointer;
+    }
     .theme-btn {
-      background: none; border: 1px solid var(--border);
-      border-radius: 8px; padding: 6px 10px;
-      font-size: 16px; cursor: pointer; color: var(--text);
-      flex-shrink: 0;
-    }
-    .search-row { display: flex; gap: 8px; margin-top: 16px; }
-    .search-row input {
-      flex: 1; padding: 10px 14px; border-radius: 10px;
-      border: 1px solid var(--border);
-      background: var(--surface2); color: var(--text);
-      font-size: 14px; outline: none;
-    }
-    .search-row input:focus { border-color: var(--accent); }
-    .search-row button {
-      padding: 10px 18px; border-radius: 10px;
-      background: var(--accent); border: none;
-      color: #fff; font-weight: 700; font-size: 14px; cursor: pointer;
+      background: none; border: 1px solid var(--border2);
+      border-radius: var(--radius); padding: 7px 10px;
+      font-size: 15px; cursor: pointer; color: var(--text); line-height: 1;
     }
 
-    /* ── Topic pills ── */
-    .pills { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 14px; }
-    .pill {
-      padding: 5px 12px; border-radius: 999px;
-      border: 1px solid var(--border);
-      background: var(--pill-bg);
-      font-size: 12px; font-weight: 600; color: var(--muted);
-      transition: all .15s;
+    /* ── Ticker ── */
+    .ticker {
+      background: var(--accent);
+      overflow: hidden; white-space: nowrap;
+      font-family: system-ui; font-size: 12px; font-weight: 700;
+      letter-spacing: .03em;
     }
-    .pill:hover { color: var(--text); border-color: rgba(255,255,255,.2); }
-    .pill.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .ticker-inner {
+      display: flex; align-items: stretch;
+    }
+    .ticker-label {
+      background: #000; color: var(--accent);
+      padding: 5px 14px; flex-shrink: 0;
+      font-size: 11px; letter-spacing: .1em;
+      display: flex; align-items: center;
+    }
+    .ticker-track {
+      padding: 5px 0;
+      overflow: hidden; flex: 1;
+    }
+    .ticker-scroll {
+      display: inline-block;
+      animation: ticker 60s linear infinite;
+      padding-left: 100%;
+    }
+    .ticker-scroll:hover { animation-play-state: paused; }
+    .ticker-item { display: inline; margin-right: 60px; color: #fff; }
+    .ticker-item a { color: #fff; }
+    .ticker-item a:hover { text-decoration: underline; }
+    @keyframes ticker { from { transform: translateX(0); } to { transform: translateX(-100%); } }
 
-    /* ── Ad slots ── */
+    /* ── Topic nav ── */
+    .topic-nav {
+      background: var(--surface2);
+      border-bottom: 1px solid var(--border);
+      overflow-x: auto; scrollbar-width: none;
+    }
+    .topic-nav::-webkit-scrollbar { display: none; }
+    .topic-nav-inner {
+      max-width: 1280px; margin: 0 auto;
+      padding: 0 20px;
+      display: flex; gap: 2px;
+    }
+    .tnav-pill {
+      padding: 9px 14px; font-size: 12px; font-weight: 700;
+      font-family: system-ui; letter-spacing: .03em;
+      color: var(--muted); white-space: nowrap;
+      border-bottom: 3px solid transparent;
+      transition: color .15s, border-color .15s;
+    }
+    .tnav-pill:hover { color: var(--text); }
+    .tnav-pill.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+    /* ════════════════════════════════════════════
+       PAGE WRAPPER
+    ════════════════════════════════════════════ */
+    .page { max-width: 1280px; margin: 0 auto; padding: 24px 20px 80px; }
+
+    /* ════════════════════════════════════════════
+       HERO
+    ════════════════════════════════════════════ */
+    .hero {
+      display: grid;
+      grid-template-columns: 1fr 420px;
+      gap: 0;
+      background: var(--surface);
+      border: 1px solid var(--border2);
+      border-radius: var(--radius);
+      overflow: hidden;
+      margin-bottom: 24px;
+      box-shadow: var(--shadow);
+      min-height: 320px;
+    }
+    @media (max-width: 860px) { .hero { grid-template-columns: 1fr; } .hero-img { max-height: 220px; } }
+    .hero-body {
+      padding: 28px 30px;
+      display: flex; flex-direction: column; justify-content: space-between;
+      border-right: 1px solid var(--border);
+    }
+    .hero-badges { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; }
+    .badge-breaking {
+      background: var(--accent); color: #fff;
+      font-size: 10px; font-weight: 900; letter-spacing: .12em;
+      padding: 3px 8px; border-radius: 3px;
+      font-family: system-ui; text-transform: uppercase;
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.7} }
+    .badge-new {
+      background: var(--green); color: #fff;
+      font-size: 10px; font-weight: 800; letter-spacing: .08em;
+      padding: 3px 8px; border-radius: 3px;
+      font-family: system-ui; text-transform: uppercase;
+    }
+    .badge-topic {
+      font-size: 11px; font-weight: 800; letter-spacing: .1em;
+      text-transform: uppercase; font-family: system-ui;
+    }
+    .hero h1 {
+      font-size: 28px; font-weight: 700; line-height: 1.25;
+      margin-bottom: 14px; color: var(--text);
+    }
+    .hero h1 a:hover { color: var(--accent); }
+    .hero-summary {
+      font-size: 15px; color: var(--text2); line-height: 1.6;
+      margin-bottom: 20px; flex: 1;
+    }
+    .hero-meta {
+      font-size: 12px; color: var(--muted); font-family: system-ui;
+      display: flex; gap: 14px; align-items: center; flex-wrap: wrap;
+    }
+    .hero-source { font-weight: 700; color: var(--text2); }
+    .hero-read {
+      display: inline-block; margin-top: 16px;
+      background: var(--accent); color: #fff;
+      padding: 10px 20px; border-radius: var(--radius);
+      font-size: 13px; font-weight: 700; font-family: system-ui;
+      transition: background .15s; align-self: flex-start;
+    }
+    .hero-read:hover { background: var(--accent2); }
+    .hero-img {
+      overflow: hidden; background: var(--surface2);
+    }
+    .hero-img img {
+      width: 100%; height: 100%;
+      object-fit: cover; display: block;
+      transition: transform .4s;
+    }
+    .hero:hover .hero-img img { transform: scale(1.03); }
+    .hero-img-placeholder {
+      width: 100%; height: 100%; min-height: 280px;
+      background: linear-gradient(135deg, var(--surface2) 0%, var(--surface3) 100%);
+      display: flex; align-items: center; justify-content: center;
+      color: var(--muted); font-size: 40px;
+    }
+
+    /* ════════════════════════════════════════════
+       AD BANNER
+    ════════════════════════════════════════════ */
     .ad-banner {
-      background: var(--surface2);
-      border: 1px dashed var(--border);
-      border-radius: var(--radius);
-      height: 90px;
+      background: var(--surface2); border: 1px dashed var(--border2);
+      border-radius: var(--radius); height: 90px;
       display: flex; align-items: center; justify-content: center;
-      color: var(--muted); font-size: 12px;
-      margin-bottom: 20px;
-    }
-    .ad-rect {
-      background: var(--surface2);
-      border: 1px dashed var(--border);
-      border-radius: var(--radius);
-      height: 250px;
-      display: flex; align-items: center; justify-content: center;
-      color: var(--muted); font-size: 12px;
-      margin-bottom: 16px;
+      color: var(--muted); font-size: 11px; font-family: system-ui;
+      margin-bottom: 24px; letter-spacing: .05em;
     }
 
-    /* ── Section heading ── */
-    .section-head {
-      font-size: 13px; font-weight: 700; color: var(--muted);
-      text-transform: uppercase; letter-spacing: .06em;
-      margin-bottom: 12px;
+    /* ════════════════════════════════════════════
+       CONTENT GRID
+    ════════════════════════════════════════════ */
+    .content-grid {
+      display: grid;
+      grid-template-columns: 1fr 260px;
+      gap: 24px;
+      align-items: start;
+    }
+    @media (max-width: 900px) { .content-grid { grid-template-columns: 1fr; } .sidebar { display: none; } }
+
+    /* ── Section label ── */
+    .section-label {
+      font-size: 11px; font-weight: 800; letter-spacing: .12em;
+      text-transform: uppercase; color: var(--muted);
+      font-family: system-ui; margin-bottom: 14px;
+      padding-bottom: 8px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between;
     }
 
-    /* ── Story card ── */
+    /* ════════════════════════════════════════════
+       STORY CARDS (3-col grid)
+    ════════════════════════════════════════════ */
+    .story-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+    }
+    @media (max-width: 700px) { .story-grid { grid-template-columns: 1fr; } }
+    @media (min-width: 701px) and (max-width: 1000px) { .story-grid { grid-template-columns: repeat(2, 1fr); } }
+
     .card {
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: var(--radius);
-      padding: 18px 20px;
-      margin-bottom: 14px;
+      overflow: hidden;
+      display: flex; flex-direction: column;
+      transition: border-color .15s, transform .15s, box-shadow .15s;
       box-shadow: var(--shadow);
-      transition: border-color .15s;
     }
-    .card:hover { border-color: rgba(230,57,70,.35); }
-    .card-topic {
-      display: inline-block;
-      font-size: 11px; font-weight: 700; text-transform: uppercase;
-      letter-spacing: .07em; color: var(--accent);
-      margin-bottom: 8px;
-    }
-    .card h3 {
-      font-size: 17px; font-weight: 700; line-height: 1.3;
-      margin-bottom: 10px;
+    .card:hover {
+      border-color: var(--border2);
+      transform: translateY(-2px);
+      box-shadow: 0 8px 28px rgba(0,0,0,.5);
     }
 
-    /* ── Structured summary ── */
-    .summary-section { margin-top: 8px; }
-    .summary-label {
-      font-size: 10px; font-weight: 700; text-transform: uppercase;
-      letter-spacing: .08em; color: var(--muted);
-      margin-bottom: 4px;
+    /* card image */
+    .card-img {
+      aspect-ratio: 16 / 9;
+      overflow: hidden; background: var(--surface2); flex-shrink: 0;
     }
-    .summary-text { font-size: 14px; color: var(--text); line-height: 1.55; }
-    .bullets { list-style: none; margin-top: 10px; display: flex; flex-direction: column; gap: 5px; }
-    .bullets li {
-      font-size: 13px; color: var(--text);
-      padding-left: 16px; position: relative;
+    .card-img img {
+      width: 100%; height: 100%; object-fit: cover; display: block;
+      transition: transform .35s;
     }
-    .bullets li::before {
-      content: "→";
-      position: absolute; left: 0;
-      color: var(--accent); font-size: 12px;
-    }
+    .card:hover .card-img img { transform: scale(1.05); }
 
-    /* ── Card footer ── */
-    .card-footer {
-      display: flex; align-items: center; justify-content: space-between;
-      flex-wrap: wrap; gap: 10px;
-      margin-top: 14px; padding-top: 12px;
-      border-top: 1px solid var(--border);
+    /* card body */
+    .card-body { padding: 14px 15px 16px; display: flex; flex-direction: column; flex: 1; }
+    .card-badges { display: flex; gap: 6px; align-items: center; margin-bottom: 9px; flex-wrap: wrap; }
+    .card h2 {
+      font-size: 15px; font-weight: 700; line-height: 1.35;
+      margin-bottom: 8px; color: var(--text);
     }
-    .card-meta { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-    .source-tag {
-      font-size: 12px; color: var(--muted); font-weight: 600;
+    .card h2 a:hover { color: var(--accent); }
+    .card-summary {
+      font-size: 13px; color: var(--text2); line-height: 1.5;
+      margin-bottom: 10px; flex: 1;
+      display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
     }
-    .time-tag { font-size: 12px; color: var(--muted); }
-    .read-btn {
-      display: inline-flex; align-items: center; gap: 5px;
-      padding: 7px 14px; border-radius: 8px;
-      background: var(--accent); color: #fff;
-      font-size: 13px; font-weight: 700;
-      transition: background .15s;
+    .card-meta {
+      font-size: 11px; color: var(--muted); font-family: system-ui;
+      display: flex; align-items: center; gap: 8px; margin-top: auto;
+      padding-top: 10px; border-top: 1px solid var(--border);
     }
-    .read-btn:hover { background: var(--accent2); text-decoration: none; }
+    .card-source { font-weight: 700; color: var(--text2); }
+    .card-dot { color: var(--border2); }
 
-    /* ── Load more ── */
-    .load-wrap { text-align: center; margin-top: 20px; }
-    #loadMore {
-      padding: 11px 28px; border-radius: 10px;
-      background: var(--surface); border: 1px solid var(--border);
-      color: var(--text); font-weight: 700; font-size: 14px; cursor: pointer;
-      transition: border-color .15s;
-    }
-    #loadMore:hover { border-color: var(--accent); }
-    #loadStatus { font-size: 12px; color: var(--muted); margin-top: 8px; }
+    /* category color coding */
+    .t-trump, .t-election, .t-deep-state, .t-deep_state,
+    .t-fbi, .t-cia, .t-doj, .t-dni,
+    .t-indictment, .t-impeachment, .t-corruption { color: #ef4444; }
+    .t-russia, .t-ukraine, .t-zelensky, .t-nato, .t-brics { color: #60a5fa; }
+    .t-israel, .t-netanyahu, .t-gaza, .t-iran,
+    .t-saudi, .t-saudi-arabia { color: #a78bfa; }
+    .t-china, .t-taiwan, .t-north-korea { color: #fb923c; }
+    .t-bitcoin, .t-crypto, .t-cbdc,
+    .t-economy, .t-federal-reserve { color: #34d399; }
+    .t-military, .t-pentagon { color: #94a3b8; }
+    .t-ufo { color: #e879f9; }
+    .t-musk, .t-doge { color: #38bdf8; }
 
-    /* ── Sidebar ── */
-    .sidebar-card {
+    /* ════════════════════════════════════════════
+       SIDEBAR
+    ════════════════════════════════════════════ */
+    .sidebar-widget {
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: var(--radius);
-      padding: 16px 18px;
-      margin-bottom: 14px;
-      box-shadow: var(--shadow);
+      overflow: hidden;
+      margin-bottom: 16px;
     }
-    .sidebar-title {
-      font-size: 12px; font-weight: 700; text-transform: uppercase;
-      letter-spacing: .07em; color: var(--muted); margin-bottom: 12px;
+    .widget-head {
+      font-size: 11px; font-weight: 800; letter-spacing: .1em;
+      text-transform: uppercase; font-family: system-ui;
+      padding: 10px 14px; border-bottom: 1px solid var(--border);
+      color: var(--muted);
     }
     .topic-row {
       display: flex; align-items: center; justify-content: space-between;
-      padding: 6px 0; border-bottom: 1px solid var(--border);
-      font-size: 13px;
+      padding: 8px 14px; border-bottom: 1px solid var(--border);
+      font-size: 13px; font-family: system-ui;
+      transition: background .1s;
     }
     .topic-row:last-child { border-bottom: none; }
-    .topic-row a { color: var(--text); font-weight: 600; }
-    .topic-row a:hover { color: var(--blue); text-decoration: none; }
+    .topic-row:hover { background: var(--surface2); }
+    .topic-row a { color: var(--text2); font-weight: 600; }
+    .topic-row a:hover { color: var(--text); }
     .topic-count {
       font-size: 11px; color: var(--muted);
-      background: var(--pill-bg); padding: 2px 7px; border-radius: 999px;
+      background: var(--surface2); padding: 2px 7px; border-radius: 999px;
+    }
+    .ad-rect {
+      background: var(--surface2); border: 1px dashed var(--border2);
+      border-radius: var(--radius); height: 250px;
+      display: flex; align-items: center; justify-content: center;
+      color: var(--muted); font-size: 11px; font-family: system-ui;
+      margin-bottom: 16px;
     }
 
-    /* ── Empty state ── */
+    /* ════════════════════════════════════════════
+       LOAD MORE
+    ════════════════════════════════════════════ */
+    .load-wrap { grid-column: 1/-1; text-align: center; margin-top: 24px; }
+    #loadMore {
+      padding: 11px 32px; border-radius: var(--radius);
+      background: var(--surface); border: 1px solid var(--border2);
+      color: var(--text); font-weight: 700; font-size: 13px;
+      font-family: system-ui; cursor: pointer; transition: all .15s;
+    }
+    #loadMore:hover { border-color: var(--accent); color: var(--accent); }
+    #loadStatus { font-size: 12px; color: var(--muted); margin-top: 8px; font-family: system-ui; }
+
+    /* ════════════════════════════════════════════
+       EMPTY
+    ════════════════════════════════════════════ */
     .empty {
-      text-align: center; padding: 60px 20px;
-      color: var(--muted); font-size: 15px;
+      grid-column: 1/-1;
+      text-align: center; padding: 80px 20px;
+      color: var(--muted); font-family: system-ui;
     }
     .empty strong { display: block; font-size: 20px; margin-bottom: 8px; color: var(--text); }
   </style>
 </head>
 <body>
 
-{% macro story_card(s) %}
-<div class="card">
-  <div class="card-topic">{{ s.topic }}</div>
-  <h3>{{ s.title }}</h3>
-
-  {% if s.summary %}
-    <div class="summary-section">
-      <div class="summary-label">Summary</div>
-      <div class="summary-text">{{ s.summary }}</div>
-    </div>
-  {% endif %}
-
-  {% if s.bullets %}
-    <ul class="bullets">
-      {% for b in s.bullets %}<li>{{ b }}</li>{% endfor %}
-    </ul>
-  {% endif %}
-
-  <div class="card-footer">
-    <div class="card-meta">
-      {% if s.source %}<span class="source-tag">{{ s.source }}</span>{% endif %}
-      {% if s.added_at %}<span class="time-tag">{{ s.added_at }}</span>{% endif %}
-    </div>
-    <a class="read-btn" href="{{ s.link }}" target="_blank" rel="noopener noreferrer">
-      Read story →
-    </a>
-  </div>
-</div>
-{% endmacro %}
-
-<div class="page">
-
-  <!-- Header -->
-  <div class="header">
-    <div class="header-top">
-      <div>
-        <div class="site-name">News<span>Wire</span></div>
-        <div class="header-meta">
-          Tracking {{ total_topics }} topics across {{ feed_count }} sources
-          {% if last_updated %}· Updated <span id="last-updated" data-utc="{{ last_updated }}"></span>{% endif %}
-        </div>
+<!-- ═══════════════ MASTHEAD ═══════════════ -->
+<header class="masthead">
+  <div class="masthead-top">
+    <div>
+      <div class="site-name">News<em>Wire</em></div>
+      <div class="masthead-tagline">
+        {{ total_topics }} topics · {{ feed_count }} sources
+        {% if last_updated %}· <span id="last-updated" data-utc="{{ last_updated }}"></span>{% endif %}
       </div>
+    </div>
+    <div class="masthead-right">
+      <form class="search-form" method="get" action="{{ url_for('home') }}">
+        <input name="q" placeholder="Search headlines…" value="{{ q }}" autocomplete="off"/>
+        <button type="submit">Search</button>
+      </form>
       <button class="theme-btn" id="theme-btn" title="Toggle theme">🌙</button>
     </div>
+  </div>
 
-    <form class="search-row" method="get" action="{{ url_for('home') }}">
-      <input name="q" placeholder="Search stories, topics, keywords…" value="{{ q }}" autocomplete="off"/>
-      <button type="submit">Search</button>
-    </form>
+  <!-- Ticker -->
+  {% if stories %}
+  <div class="ticker">
+    <div class="ticker-inner">
+      <div class="ticker-label">LATEST</div>
+      <div class="ticker-track">
+        <div class="ticker-scroll">
+          {% for s in stories[:12] %}
+            <span class="ticker-item"><a href="{{ s.link }}" target="_blank" rel="noopener">{{ s.title }}</a></span>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
 
-    <div class="pills">
-      <a class="pill {% if not active_topic %}active{% endif %}" href="{{ url_for('home') }}">All</a>
+  <!-- Topic nav -->
+  <nav class="topic-nav">
+    <div class="topic-nav-inner">
+      <a class="tnav-pill {% if not active_topic %}active{% endif %}" href="{{ url_for('home') }}">All</a>
       {% for t in all_topics %}
-        <a class="pill {% if active_topic and active_topic|lower == t|lower %}active{% endif %}"
+        <a class="tnav-pill {% if active_topic and active_topic|lower == t|lower %}active{% endif %}"
            href="{{ url_for('topic_page', topic=t) }}">{{ t }}</a>
       {% endfor %}
     </div>
-  </div>
+  </nav>
+</header>
 
-  <!-- Leaderboard ad slot (728×90 desktop / responsive) -->
+<div class="page">
+
+  <!-- ═══════════════ HERO ═══════════════ -->
+  {% if hero %}
+  <section class="hero">
+    <div class="hero-body">
+      <div>
+        <div class="hero-badges">
+          {% if hero.is_breaking %}<span class="badge-breaking">Breaking</span>{% elif hero.is_new %}<span class="badge-new">New</span>{% endif %}
+          <span class="badge-topic {{ ('t-' + hero.topic|lower|replace(' / ','_')|replace(' ','-')|replace('/','')) if hero.topic else '' }}">{{ hero.topic }}</span>
+        </div>
+        <h1><a href="{{ hero.link }}" target="_blank" rel="noopener noreferrer">{{ hero.title }}</a></h1>
+        {% if hero.summary %}
+          <div class="hero-summary">{{ hero.summary[:280] }}{% if hero.summary|length > 280 %}…{% endif %}</div>
+        {% endif %}
+      </div>
+      <div>
+        <div class="hero-meta">
+          <span class="hero-source">{{ hero.source }}</span>
+          <span>{{ hero.added_at }}</span>
+        </div>
+        <a class="hero-read" href="{{ hero.link }}" target="_blank" rel="noopener noreferrer">Read full story →</a>
+      </div>
+    </div>
+    <div class="hero-img">
+      {% if hero.image_url %}
+        <img src="{{ hero.image_url }}" alt="{{ hero.title }}" loading="eager"/>
+      {% else %}
+        <div class="hero-img-placeholder">📰</div>
+      {% endif %}
+    </div>
+  </section>
+  {% endif %}
+
+  <!-- Ad banner -->
   <div class="ad-banner">
     Advertisement
-    <!-- Replace with your AdSense unit:
-    <ins class="adsbygoogle" style="display:block" data-ad-client="ca-pub-XXXX"
+    <!-- <ins class="adsbygoogle" style="display:block" data-ad-client="ca-pub-XXXX"
          data-ad-slot="XXXXXXXXXX" data-ad-format="auto" data-full-width-responsive="true"></ins>
-    <script>(adsbygoogle = window.adsbygoogle || []).push({});</script>
-    -->
+    <script>(adsbygoogle = window.adsbygoogle || []).push({});</script> -->
   </div>
 
-  <div class="grid">
-    <!-- Main feed -->
+  <!-- ═══════════════ CONTENT ═══════════════ -->
+  <div class="content-grid">
     <div>
-      <div class="section-head">{{ heading }}</div>
+      <div class="section-label">
+        <span>{{ heading }}</span>
+      </div>
 
-      <div id="stories">
+      <div class="story-grid" id="stories">
         {% if stories %}
           {% for s in stories %}
-            {{ story_card(s) }}
+          <article class="card">
+            {% if s.image_url %}
+            <div class="card-img">
+              <img src="{{ s.image_url }}" alt="{{ s.title }}" loading="lazy"/>
+            </div>
+            {% endif %}
+            <div class="card-body">
+              <div class="card-badges">
+                {% if s.is_breaking %}<span class="badge-breaking">Breaking</span>
+                {% elif s.is_new %}<span class="badge-new">New</span>{% endif %}
+                {% if s.topic %}
+                <span class="badge-topic {{ ('t-' + s.topic|lower|replace(' / ','_')|replace(' ','-')|replace('/','')) if s.topic else '' }}">{{ s.topic }}</span>
+                {% endif %}
+              </div>
+              <h2><a href="{{ s.link }}" target="_blank" rel="noopener noreferrer">{{ s.title }}</a></h2>
+              {% if s.summary %}
+                <div class="card-summary">{{ s.summary }}</div>
+              {% endif %}
+              <div class="card-meta">
+                <span class="card-source">{{ s.source }}</span>
+                <span class="card-dot">·</span>
+                <span>{{ s.added_at }}</span>
+              </div>
+            </div>
+          </article>
           {% endfor %}
         {% else %}
           <div class="empty">
             <strong>No stories found</strong>
-            {% if q %}Try a different search term.{% else %}Check back soon — articles update every 15 minutes.{% endif %}
+            {% if q %}Try a different search term.{% else %}Check back soon — the feed updates every 15 minutes.{% endif %}
           </div>
         {% endif %}
       </div>
@@ -667,14 +926,9 @@ BASE_HTML = r"""
 
     <!-- Sidebar -->
     <div class="sidebar">
-      <!-- Rectangle ad (300×250) -->
-      <div class="ad-rect">
-        Advertisement
-        <!-- Replace with your AdSense unit -->
-      </div>
-
-      <div class="sidebar-card">
-        <div class="sidebar-title">Topics</div>
+      <div class="ad-rect">Advertisement</div>
+      <div class="sidebar-widget">
+        <div class="widget-head">Topics</div>
         {% for t in all_topics %}
           <div class="topic-row">
             <a href="{{ url_for('topic_page', topic=t) }}">{{ t }}</a>
@@ -691,14 +945,14 @@ BASE_HTML = r"""
 
 <script>
 (function () {
-  // ── Theme toggle ──
+  // ── Theme ──
   const btn = document.getElementById('theme-btn');
-  const saved = localStorage.getItem('theme') || 'dark';
+  const saved = localStorage.getItem('nw-theme') || 'dark';
   if (saved === 'light') { document.body.classList.add('light'); btn.textContent = '☀️'; }
   btn.addEventListener('click', () => {
-    const isLight = document.body.classList.toggle('light');
-    btn.textContent = isLight ? '☀️' : '🌙';
-    localStorage.setItem('theme', isLight ? 'light' : 'dark');
+    const light = document.body.classList.toggle('light');
+    btn.textContent = light ? '☀️' : '🌙';
+    localStorage.setItem('nw-theme', light ? 'light' : 'dark');
   });
 
   // ── Last updated ──
@@ -706,49 +960,43 @@ BASE_HTML = r"""
   if (lu) {
     try {
       const d = new Date(lu.dataset.utc);
-      if (!isNaN(d)) lu.textContent = d.toLocaleString(undefined, {
-        year:'numeric', month:'short', day:'numeric',
-        hour:'numeric', minute:'2-digit', hour12:true
-      });
+      if (!isNaN(d)) lu.textContent = 'Updated ' + d.toLocaleTimeString(undefined, {hour:'numeric',minute:'2-digit',hour12:true});
     } catch(_) {}
   }
 
   // ── HTML escape ──
-  const esc = s => (s || '').replace(/[&<>"']/g, c =>
-    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const esc = s => (s||'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
-  // ── Render a card from API JSON ──
+  // ── Topic CSS class ──
+  const topicClass = t => t ? 't-' + t.toLowerCase().replace(/ \/ /g,'_').replace(/ /g,'-').replace(/\//g,'') : '';
+
+  // ── Render card from API JSON ──
   function renderCard(s) {
-    const topic    = esc(s.topic || '');
-    const title    = esc(s.title || '');
-    const source   = esc(s.source || '');
-    const time     = esc(s.added_at || '');
-    const link     = esc(s.link || '#');
-    const summary  = esc(s.summary || '');
-    const bullets  = (s.bullets || []).map(b => `<li>${esc(b)}</li>`).join('');
-
-    const summaryHtml = summary
-      ? `<div class="summary-section">
-           <div class="summary-label">Summary</div>
-           <div class="summary-text">${summary}</div>
-         </div>`
+    const imgHtml = s.image_url
+      ? `<div class="card-img"><img src="${esc(s.image_url)}" alt="${esc(s.title)}" loading="lazy"/></div>`
       : '';
-    const bulletsHtml = bullets
-      ? `<ul class="bullets">${bullets}</ul>`
+    const breakBadge = s.is_breaking
+      ? '<span class="badge-breaking">Breaking</span>'
+      : (s.is_new ? '<span class="badge-new">New</span>' : '');
+    const topicBadge = s.topic
+      ? `<span class="badge-topic ${topicClass(s.topic)}">${esc(s.topic)}</span>`
       : '';
-    const metaHtml = (source || time)
-      ? `<div class="card-meta">${source ? `<span class="source-tag">${source}</span>` : ''}${time ? `<span class="time-tag">${time}</span>` : ''}</div>`
+    const summaryHtml = s.summary
+      ? `<div class="card-summary">${esc(s.summary)}</div>`
       : '';
-
-    return `<div class="card">
-      <div class="card-topic">${topic}</div>
-      <h3>${title}</h3>
-      ${summaryHtml}${bulletsHtml}
-      <div class="card-footer">
-        ${metaHtml}
-        <a class="read-btn" href="${link}" target="_blank" rel="noopener noreferrer">Read story →</a>
+    return `<article class="card">
+      ${imgHtml}
+      <div class="card-body">
+        <div class="card-badges">${breakBadge}${topicBadge}</div>
+        <h2><a href="${esc(s.link)}" target="_blank" rel="noopener noreferrer">${esc(s.title)}</a></h2>
+        ${summaryHtml}
+        <div class="card-meta">
+          <span class="card-source">${esc(s.source)}</span>
+          <span class="card-dot">·</span>
+          <span>${esc(s.added_at)}</span>
+        </div>
       </div>
-    </div>`;
+    </article>`;
   }
 
   // ── Load more ──
@@ -761,10 +1009,8 @@ BASE_HTML = r"""
     const params = new URLSearchParams({ page: nextPage });
     if (loadBtn.dataset.topic) params.set('topic', loadBtn.dataset.topic);
     if (loadBtn.dataset.q)     params.set('q', loadBtn.dataset.q);
-
     loadBtn.disabled = true;
     status.textContent = 'Loading…';
-
     try {
       const res  = await fetch('/api/stories?' + params, { headers: { Accept: 'application/json' } });
       const data = await res.json();
@@ -793,23 +1039,33 @@ BASE_HTML = r"""
 
 def render(heading, stories, page, active_topic=None, q=""):
     topic_counts = get_article_counts()
+    # Pull hero from first story, rest go into the grid
+    hero = stories[0] if stories else None
+    grid = stories[1:] if stories else []
     return render_template_string(
         BASE_HTML,
-        page_title=f"{active_topic or 'Latest'} – NewsWire" if active_topic else "NewsWire – News Aggregator",
+        page_title=f"{active_topic} – NewsWire" if active_topic else "NewsWire – Breaking News Aggregator",
         heading=heading,
-        stories=stories,
+        hero=hero,
+        stories=grid,
         page=page,
         active_topic=active_topic,
         q=q,
         all_topics=ALL_TOPICS,
         total_topics=len(ALL_TOPICS),
-        feed_count=10,
+        feed_count=35,
         last_updated=get_latest_update(),
         topic_counts=topic_counts,
     )
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
+
+@app.before_request
+def _ensure_columns():
+    ensure_image_column()
+    ensure_brief_columns()
+
 
 @app.get("/health")
 def health():
