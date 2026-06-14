@@ -392,7 +392,7 @@ BASE_HTML = r"""
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>{{ page_title }}</title>
-  <meta name="description" content="Breaking news aggregator tracking the stories that matter."/>
+  <meta name="description" content="Squirrel Brain News — breaking news for broken attention spans."/>
 
   <!-- Google AdSense — replace ca-pub-XXXXXXXXXXXXXXXX with your publisher ID -->
   <!-- <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-XXXXXXXXXXXXXXXX" crossorigin="anonymous"></script> -->
@@ -411,9 +411,9 @@ BASE_HTML = r"""
       --text:      #f0ebe0;
       --text2:     #b8a898;
       --muted:     #5a6672;
-      --accent:    #c8972a;
-      --accent2:   #a87a1c;
-      --gold:      #c8972a;
+      --accent:    #e8741e;
+      --accent2:   #c45e10;
+      --gold:      #e8741e;
       --green:     #16a34a;
       --shadow:    0 4px 20px rgba(0,0,0,.7);
       --radius:    8px;
@@ -459,9 +459,9 @@ BASE_HTML = r"""
       display: flex; align-items: center; justify-content: space-between; gap: 16px;
     }
     .site-name {
-      font-size: 32px; font-weight: 900; letter-spacing: -1px;
+      font-size: 26px; font-weight: 900; letter-spacing: -0.5px;
       font-family: system-ui, -apple-system, sans-serif;
-      line-height: 1;
+      line-height: 1; text-transform: uppercase;
     }
     .site-name em { color: var(--accent); font-style: normal; }
     .masthead-tagline { font-size: 11px; color: var(--muted); margin-top: 3px;
@@ -829,9 +829,9 @@ BASE_HTML = r"""
 <header class="masthead">
   <div class="masthead-top">
     <div>
-      <div class="site-name">News<em>Wire</em></div>
+      <div class="site-name">Squirrel Brain <em>News</em></div>
       <div class="masthead-tagline">
-        {{ total_topics }} topics · {{ feed_count }} sources
+        Breaking news for broken attention spans · {{ feed_count }} sources
         {% if last_updated %}· <span id="last-updated" data-utc="{{ last_updated }}"></span>{% endif %}
       </div>
     </div>
@@ -1118,7 +1118,7 @@ def render(heading, stories, page, active_topic=None, q=""):
     grid = stories[1:] if stories else []
     return render_template_string(
         BASE_HTML,
-        page_title=f"{active_topic} – NewsWire" if active_topic else "NewsWire – Breaking News Aggregator",
+        page_title=f"{active_topic} – Squirrel Brain News" if active_topic else "Squirrel Brain News – Breaking News For Broken Attention Spans",
         heading=heading,
         hero=hero,
         stories=grid,
