@@ -5,6 +5,8 @@ import time
 import html
 import hashlib
 import sqlite3
+import tempfile
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 
@@ -36,13 +38,14 @@ TWITTER_API_KEY        = os.getenv("TWITTER_API_KEY")
 TWITTER_API_SECRET     = os.getenv("TWITTER_API_SECRET")
 TWITTER_ACCESS_TOKEN   = os.getenv("TWITTER_ACCESS_TOKEN")
 TWITTER_ACCESS_SECRET  = os.getenv("TWITTER_ACCESS_SECRET")
-MAX_TWEETS_PER_CYCLE   = int(os.getenv("MAX_TWEETS_PER_CYCLE", "8"))
+MAX_TWEETS_PER_CYCLE   = int(os.getenv("MAX_TWEETS_PER_CYCLE", "3"))
 
 # How similar two titles must be to count as the same story (0.0–1.0)
 TITLE_SIMILARITY_THRESHOLD = 0.82
 
 _openai_client = None
 _twitter_client = None
+_twitter_v1 = None
 
 # High-priority topics that warrant an auto-tweet
 TWEET_TOPICS = {
@@ -206,7 +209,27 @@ def get_twitter_client():
         )
         return _twitter_client
     except Exception as e:
-        print(f"[TWITTER] Failed to init client: {e}")
+        print(f"[TWITTER] Failed to init v2 client: {e}")
+        return None
+
+
+def get_twitter_v1():
+    global _twitter_v1
+    if _twitter_v1 is not None:
+        return _twitter_v1
+    if not tweepy:
+        return None
+    if not all([TWITTER_API_KEY, TWITTER_API_SECRET, TWITTER_ACCESS_TOKEN, TWITTER_ACCESS_SECRET]):
+        return None
+    try:
+        auth = tweepy.OAuth1UserHandler(
+            TWITTER_API_KEY, TWITTER_API_SECRET,
+            TWITTER_ACCESS_TOKEN, TWITTER_ACCESS_SECRET,
+        )
+        _twitter_v1 = tweepy.API(auth)
+        return _twitter_v1
+    except Exception as e:
+        print(f"[TWITTER] Failed to init v1 API: {e}")
         return None
 
 
@@ -223,24 +246,87 @@ def mark_tweeted(article_id):
         conn.close()
 
 
-def tweet_story(article_id, title, link, topic, source):
-    """Post a story to Twitter/X. Returns True on success."""
+def extract_tweet_summary(summary_text):
+    """Pull just the SUMMARY paragraph from the stored AI summary."""
+    if not summary_text:
+        return ""
+    text = summary_text
+    if "SUMMARY" in text:
+        text = text.split("SUMMARY", 1)[1].strip()
+    if "KEY POINTS" in text:
+        text = text.split("KEY POINTS", 1)[0].strip()
+    if len(text) > 220:
+        text = text[:217] + "…"
+    return text
+
+
+def upload_tweet_image(image_url):
+    """Download image and upload to Twitter v1 API. Returns media_id string or None."""
+    v1 = get_twitter_v1()
+    if not v1 or not image_url:
+        return None
+    tmp_path = None
+    try:
+        ext = ".jpg"
+        for e in (".png", ".webp", ".gif", ".jpeg", ".jpg"):
+            if e in image_url.lower():
+                ext = e
+                break
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=ext)
+        os.close(tmp_fd)
+        req = urllib.request.Request(image_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            with open(tmp_path, "wb") as f:
+                f.write(resp.read(5 * 1024 * 1024))  # cap at 5MB
+        media = v1.media_upload(filename=tmp_path)
+        return str(media.media_id)
+    except Exception as e:
+        print(f"  [TWEET IMAGE] {e}")
+        return None
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+
+def tweet_story(article_id, title, link, topic, source, summary="", image_url=""):
+    """Post story as main tweet (headline + summary + image) then reply with link."""
     client = get_twitter_client()
     if not client:
         return False
 
-    # Build tweet — keep well under 280 chars; URL counts as 23 chars on Twitter
-    tag = f"#{topic.replace(' / ', '').replace(' ', '').replace('-', '')}" if topic else ""
-    body = title
-    # Truncate title if needed to fit tag + link (23) + spacing
-    max_title = 280 - len(tag) - 23 - 4  # 4 = newlines/spaces
-    if len(body) > max_title:
-        body = body[:max_title - 1] + "…"
+    # Main tweet: headline + short summary, no link, no hashtag
+    headline = title if len(title) <= 200 else title[:197] + "…"
+    tweet_summary = extract_tweet_summary(summary)
 
-    tweet_text = f"{body}\n\n{tag} {link}".strip()
+    if tweet_summary:
+        body = f"{headline}\n\n{tweet_summary}"
+    else:
+        body = headline
+
+    if len(body) > 278:
+        body = body[:275] + "…"
 
     try:
-        client.create_tweet(text=tweet_text)
+        # Upload image if available
+        media_id = upload_tweet_image(image_url)
+
+        kwargs = {"text": body}
+        if media_id:
+            kwargs["media_ids"] = [media_id]
+
+        response = client.create_tweet(**kwargs)
+        tweet_id = response.data["id"]
+
+        # Reply with the article link (keeps link out of main post)
+        time.sleep(2)
+        client.create_tweet(
+            text=f"Full story → {link}",
+            in_reply_to_tweet_id=tweet_id,
+        )
+
         mark_tweeted(article_id)
         print(f"  [TWEET] {title[:60]}")
         return True
@@ -590,7 +676,7 @@ def process_feed(feed_name, url, recent_titles, tweets_this_cycle=None):
             if (tweets_this_cycle is not None
                     and tweets_this_cycle[0] < MAX_TWEETS_PER_CYCLE
                     and topic_label in TWEET_TOPICS):
-                if tweet_story(new_id, title, link, topic_label, feed_name):
+                if tweet_story(new_id, title, link, topic_label, feed_name, summary, image_url):
                     tweets_this_cycle[0] += 1
 
         except Exception as e:
