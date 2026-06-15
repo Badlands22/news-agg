@@ -4,3 +4,4 @@ feedparser
 openai
 psycopg[binary]
 pytz
+tweepy

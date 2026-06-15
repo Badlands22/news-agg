@@ -20,6 +20,11 @@ try:
 except Exception:
     OpenAI = None
 
+try:
+    import tweepy  # type: ignore
+except Exception:
+    tweepy = None
+
 # ── Config ──────────────────────────────────────────────────────────────────
 DATABASE_URL = os.getenv("DATABASE_URL")
 DB_PATH = os.getenv("DB_PATH", "news.db")
@@ -27,10 +32,26 @@ POLL_SECONDS = int(os.getenv("POLL_SECONDS", "900"))  # 15 minutes default
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
+TWITTER_API_KEY        = os.getenv("TWITTER_API_KEY")
+TWITTER_API_SECRET     = os.getenv("TWITTER_API_SECRET")
+TWITTER_ACCESS_TOKEN   = os.getenv("TWITTER_ACCESS_TOKEN")
+TWITTER_ACCESS_SECRET  = os.getenv("TWITTER_ACCESS_SECRET")
+MAX_TWEETS_PER_CYCLE   = int(os.getenv("MAX_TWEETS_PER_CYCLE", "8"))
+
 # How similar two titles must be to count as the same story (0.0–1.0)
 TITLE_SIMILARITY_THRESHOLD = 0.82
 
 _openai_client = None
+_twitter_client = None
+
+# High-priority topics that warrant an auto-tweet
+TWEET_TOPICS = {
+    "Trump", "FBI", "DOJ", "CIA", "DNI", "Deep State", "Election",
+    "Russia", "Ukraine", "Israel", "Gaza", "Iran", "China", "NATO",
+    "Immigration", "Border", "Epstein", "Indictment", "Supreme Court",
+    "Executive Order", "Musk / DOGE", "DOGE", "Devolution",
+    "Nuclear", "UFO / UAP", "Whistleblower", "Trafficking",
+}
 
 # ── Feeds ───────────────────────────────────────────────────────────────────
 FEEDS = [
@@ -166,6 +187,68 @@ TOPICS_TITLE_ONLY = {
 TOPICS = {**TOPICS_STRONG, **TOPICS_TITLE_ONLY}
 
 
+# ── Twitter ──────────────────────────────────────────────────────────────────
+
+def get_twitter_client():
+    global _twitter_client
+    if _twitter_client is not None:
+        return _twitter_client
+    if not tweepy:
+        return None
+    if not all([TWITTER_API_KEY, TWITTER_API_SECRET, TWITTER_ACCESS_TOKEN, TWITTER_ACCESS_SECRET]):
+        return None
+    try:
+        _twitter_client = tweepy.Client(
+            consumer_key=TWITTER_API_KEY,
+            consumer_secret=TWITTER_API_SECRET,
+            access_token=TWITTER_ACCESS_TOKEN,
+            access_token_secret=TWITTER_ACCESS_SECRET,
+        )
+        return _twitter_client
+    except Exception as e:
+        print(f"[TWITTER] Failed to init client: {e}")
+        return None
+
+
+def mark_tweeted(article_id):
+    ts = datetime.now(timezone.utc)
+    if using_postgres():
+        with pg_connect() as conn:
+            with conn.cursor() as c:
+                c.execute("UPDATE public.articles SET tweeted_at = %s WHERE id = %s;", (ts, article_id))
+    else:
+        conn = sqlite_connect()
+        conn.execute("UPDATE articles SET tweeted_at = ? WHERE id = ?;", (ts.isoformat(), article_id))
+        conn.commit()
+        conn.close()
+
+
+def tweet_story(article_id, title, link, topic, source):
+    """Post a story to Twitter/X. Returns True on success."""
+    client = get_twitter_client()
+    if not client:
+        return False
+
+    # Build tweet — keep well under 280 chars; URL counts as 23 chars on Twitter
+    tag = f"#{topic.replace(' / ', '').replace(' ', '').replace('-', '')}" if topic else ""
+    body = title
+    # Truncate title if needed to fit tag + link (23) + spacing
+    max_title = 280 - len(tag) - 23 - 4  # 4 = newlines/spaces
+    if len(body) > max_title:
+        body = body[:max_title - 1] + "…"
+
+    tweet_text = f"{body}\n\n{tag} {link}".strip()
+
+    try:
+        client.create_tweet(text=tweet_text)
+        mark_tweeted(article_id)
+        print(f"  [TWEET] {title[:60]}")
+        return True
+    except Exception as e:
+        print(f"  [TWEET ERROR] {e}")
+        return False
+
+
 # ── DB helpers ───────────────────────────────────────────────────────────────
 
 def using_postgres():
@@ -207,6 +290,7 @@ def init_db():
                 c.execute("ALTER TABLE public.articles ADD COLUMN IF NOT EXISTS source TEXT;")
                 c.execute("ALTER TABLE public.articles ADD COLUMN IF NOT EXISTS fingerprint TEXT;")
                 c.execute("ALTER TABLE public.articles ADD COLUMN IF NOT EXISTS image_url TEXT;")
+                c.execute("ALTER TABLE public.articles ADD COLUMN IF NOT EXISTS tweeted_at TIMESTAMPTZ;")
                 c.execute("CREATE UNIQUE INDEX IF NOT EXISTS articles_fingerprint_uniq ON public.articles (fingerprint);")
                 c.execute("CREATE INDEX IF NOT EXISTS articles_added_at_idx ON public.articles (added_at DESC);")
                 c.execute("CREATE INDEX IF NOT EXISTS articles_topic_idx ON public.articles (topic, added_at DESC);")
@@ -231,6 +315,10 @@ def init_db():
         # Add 'source' column if upgrading from old schema
         try:
             c.execute("ALTER TABLE articles ADD COLUMN source TEXT;")
+        except Exception:
+            pass
+        try:
+            c.execute("ALTER TABLE articles ADD COLUMN tweeted_at TEXT;")
         except Exception:
             pass
         c.execute("CREATE INDEX IF NOT EXISTS articles_added_at_idx ON articles (added_at DESC);")
@@ -448,7 +536,7 @@ def fallback_summary(title, desc, topic_label):
 
 MAX_ENTRIES_PER_FEED = 25  # cap to keep memory usage low on free tier
 
-def process_feed(feed_name, url, recent_titles):
+def process_feed(feed_name, url, recent_titles, tweets_this_cycle=None):
     print(f"[{feed_name}] Fetching...")
     try:
         feed = feedparser.parse(url)
@@ -495,9 +583,15 @@ def process_feed(feed_name, url, recent_titles):
 
             print(f"  [NEW] ({topic_label}) {title[:72]}")
             summary = ai_summary(title, desc, feed_name, topic_label) or fallback_summary(title, desc, topic_label)
-
             update_summary(new_id, summary)
             new_count += 1
+
+            # Auto-tweet high-priority stories
+            if (tweets_this_cycle is not None
+                    and tweets_this_cycle[0] < MAX_TWEETS_PER_CYCLE
+                    and topic_label in TWEET_TOPICS):
+                if tweet_story(new_id, title, link, topic_label, feed_name):
+                    tweets_this_cycle[0] += 1
 
         except Exception as e:
             print(f"  [ENTRY ERROR] {e}")
@@ -517,6 +611,8 @@ def main():
     print(f"║  AI:   {ai_label}")
     print(f"║  Poll: every {POLL_SECONDS}s ({POLL_SECONDS // 60}m)")
     print(f"║  Feeds: {len(FEEDS)} | Topics: {len(TOPICS)}")
+    tw = "enabled" if get_twitter_client() else "disabled (keys missing)"
+    print(f"║  Twitter: {tw} | Max tweets/cycle: {MAX_TWEETS_PER_CYCLE}")
     print(f"╚═══════════════════════════════════════════════")
 
     while True:
@@ -525,10 +621,11 @@ def main():
             print(f"\n─── Cycle: {stamp} ───")
             recent_titles = get_recent_titles(hours=24)
             total = 0
+            tweets_this_cycle = [0]  # mutable so process_feed can increment it
             for f in FEEDS:
-                total += process_feed(f["name"], f["url"], recent_titles)
+                total += process_feed(f["name"], f["url"], recent_titles, tweets_this_cycle)
                 gc.collect()  # free memory between feeds
-            print(f"─── Done. {total} new articles. Next run in {POLL_SECONDS}s ───\n")
+            print(f"─── Done. {total} new articles, {tweets_this_cycle[0]} tweets. Next run in {POLL_SECONDS}s ───\n")
             time.sleep(POLL_SECONDS)
         except KeyboardInterrupt:
             print("\nStopped by user.")
