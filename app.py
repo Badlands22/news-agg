@@ -439,11 +439,18 @@ BASE_HTML = r"""
     html { scroll-behavior: smooth; }
     body {
       font-family: "Georgia", "Times New Roman", serif;
-      background: var(--bg);
+      background: #060608;
       color: var(--text);
       line-height: 1.5;
     }
     a { color: inherit; text-decoration: none; }
+    .site-wrapper {
+      max-width: 1280px;
+      margin: 0 auto;
+      background: var(--bg);
+      box-shadow: 0 0 40px rgba(0,0,0,.8);
+      min-height: 100vh;
+    }
 
     /* ════════════════════════════════════════════
        MASTHEAD
@@ -455,7 +462,6 @@ BASE_HTML = r"""
       box-shadow: 0 2px 16px rgba(0,0,0,.6);
     }
     .masthead-top {
-      max-width: 1280px; margin: 0 auto;
       padding: 12px 20px 10px;
       display: flex; align-items: center; justify-content: space-between; gap: 16px;
     }
@@ -503,7 +509,6 @@ BASE_HTML = r"""
     }
     .ticker-inner {
       display: flex; align-items: stretch;
-      max-width: 1280px; margin: 0 auto;
     }
     .ticker-label {
       background: #000; color: var(--accent);
@@ -540,7 +545,6 @@ BASE_HTML = r"""
     }
     .topic-nav-scroll {
       overflow-x: auto; scrollbar-width: none;
-      max-width: 1280px; margin: 0 auto;
     }
     .topic-nav-scroll::-webkit-scrollbar { display: none; }
     .topic-nav-inner {
@@ -833,6 +837,7 @@ BASE_HTML = r"""
   </style>
 </head>
 <body>
+<div class="site-wrapper">
 
 <!-- ═══════════════ MASTHEAD ═══════════════ -->
 <header class="masthead">
@@ -1116,6 +1121,7 @@ BASE_HTML = r"""
   });
 })();
 </script>
+</div><!-- /.site-wrapper -->
 </body>
 </html>
 """
