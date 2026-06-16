@@ -393,6 +393,7 @@ BASE_HTML = r"""
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>{{ page_title }}</title>
   <meta name="description" content="Squirrel Brain News — breaking news for broken attention spans."/>
+  <link rel="icon" type="image/png" href="/static/logo.png"/>
 
   <!-- Google AdSense — replace ca-pub-XXXXXXXXXXXXXXXX with your publisher ID -->
   <!-- <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-XXXXXXXXXXXXXXXX" crossorigin="anonymous"></script> -->
@@ -457,6 +458,12 @@ BASE_HTML = r"""
       max-width: 1280px; margin: 0 auto;
       padding: 12px 20px 10px;
       display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    }
+    .site-logo {
+      height: 52px; width: 52px;
+      border-radius: 50%;
+      object-fit: cover;
+      flex-shrink: 0;
     }
     .site-name {
       font-size: 26px; font-weight: 900; letter-spacing: -0.5px;
@@ -828,11 +835,14 @@ BASE_HTML = r"""
 <!-- ═══════════════ MASTHEAD ═══════════════ -->
 <header class="masthead">
   <div class="masthead-top">
-    <div>
-      <div class="site-name">Squirrel Brain <em>News</em></div>
-      <div class="masthead-tagline">
-        Breaking news for broken attention spans · {{ feed_count }} sources
-        {% if last_updated %}· <span id="last-updated" data-utc="{{ last_updated }}"></span>{% endif %}
+    <div style="display:flex;align-items:center;gap:12px;">
+      <img src="/static/logo.png" alt="Squirrel Brain News" class="site-logo"/>
+      <div>
+        <div class="site-name">Squirrel Brain <em>News</em></div>
+        <div class="masthead-tagline">
+          Breaking news for broken attention spans · {{ feed_count }} sources
+          {% if last_updated %}· <span id="last-updated" data-utc="{{ last_updated }}"></span>{% endif %}
+        </div>
       </div>
     </div>
     <div class="masthead-right">

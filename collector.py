@@ -302,9 +302,9 @@ def tweet_story(article_id, title, link, topic, source, summary="", image_url=""
     tweet_summary = extract_tweet_summary(summary)
 
     if tweet_summary:
-        body = f"{headline}\n\n{tweet_summary}"
+        body = f"🥜 {headline}\n\n{tweet_summary}"
     else:
-        body = headline
+        body = f"🥜 {headline}"
 
     if len(body) > 278:
         body = body[:275] + "…"
