@@ -503,6 +503,7 @@ BASE_HTML = r"""
     }
     .ticker-inner {
       display: flex; align-items: stretch;
+      max-width: 1280px; margin: 0 auto;
     }
     .ticker-label {
       background: #000; color: var(--accent);
@@ -539,6 +540,7 @@ BASE_HTML = r"""
     }
     .topic-nav-scroll {
       overflow-x: auto; scrollbar-width: none;
+      max-width: 1280px; margin: 0 auto;
     }
     .topic-nav-scroll::-webkit-scrollbar { display: none; }
     .topic-nav-inner {
