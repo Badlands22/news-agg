@@ -247,7 +247,7 @@ def mark_tweeted(article_id):
 
 
 def extract_tweet_summary(summary_text):
-    """Pull just the SUMMARY paragraph from the stored AI summary."""
+    """Pull just the SUMMARY paragraph from the stored AI summary, ending at a sentence boundary."""
     if not summary_text:
         return ""
     text = summary_text
@@ -255,9 +255,16 @@ def extract_tweet_summary(summary_text):
         text = text.split("SUMMARY", 1)[1].strip()
     if "KEY POINTS" in text:
         text = text.split("KEY POINTS", 1)[0].strip()
-    if len(text) > 220:
-        text = text[:217] + "…"
-    return text
+    if len(text) <= 220:
+        return text
+    # Find the last complete sentence within 220 chars
+    chunk = text[:220]
+    last_end = max(chunk.rfind(". "), chunk.rfind("! "), chunk.rfind("? "))
+    if last_end > 40:
+        return text[:last_end + 1]
+    # Fall back to last word boundary
+    last_space = chunk.rfind(" ")
+    return (text[:last_space] + "…") if last_space > 40 else chunk + "…"
 
 
 def upload_tweet_image(image_url):
