@@ -529,6 +529,17 @@ def clean_text(text):
     return re.sub(r"\s+", " ", text).strip()
 
 
+def is_english(text):
+    """Return True if text is primarily English/Latin characters.
+    Rejects Cyrillic, Arabic, Chinese, Hebrew, etc.
+    Allows up to 15% non-ASCII to accommodate accented names and symbols.
+    """
+    if not text:
+        return True
+    non_ascii = sum(1 for c in text if ord(c) > 127)
+    return (non_ascii / len(text)) < 0.15
+
+
 def normalize_url(url):
     """Strip fragments and common tracking params for cleaner dedup."""
     url = (url or "").strip().split("#")[0]
@@ -719,6 +730,10 @@ def process_feed(feed_name, url, recent_titles, tweets_this_cycle=None):
             pub_date = str(entry.get("published") or entry.get("updated") or datetime.now(timezone.utc).isoformat())
 
             if not title or not link:
+                continue
+
+            # Language check — skip non-English articles (Cyrillic, Arabic, Chinese, etc.)
+            if not is_english(title):
                 continue
 
             # Blocklist check — skip irrelevant content before topic matching
