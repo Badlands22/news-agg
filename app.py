@@ -1146,7 +1146,7 @@ def render(heading, stories, page, active_topic=None, q=""):
         all_topics=ALL_TOPICS,
         nav_topics=NAV_TOPICS,
         total_topics=len(ALL_TOPICS),
-        feed_count=35,
+        feed_count=56,
         last_updated=get_latest_update(),
         topic_counts=topic_counts,
     )

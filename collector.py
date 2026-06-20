@@ -71,6 +71,18 @@ FEEDS = [
     {"name": "Politico",             "url": "https://rss.politico.com/politics-news.xml"},
     {"name": "Just the News",        "url": "https://justthenews.com/rss.xml"},
     {"name": "Google News",          "url": "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en"},
+    {"name": "CNN",                  "url": "https://rss.cnn.com/rss/edition.rss"},
+    {"name": "CBS News",             "url": "https://www.cbsnews.com/latest/rss/main"},
+    {"name": "NBC News",             "url": "https://feeds.nbcnews.com/nbcnews/public/news"},
+    {"name": "ABC News",             "url": "https://abcnews.go.com/abcnews/topstories"},
+    {"name": "Axios",                "url": "https://api.axios.com/feed/"},
+    {"name": "Semafor",              "url": "https://www.semafor.com/feed"},
+    {"name": "Punchbowl",            "url": "https://punchbowl.news/feed/"},
+    {"name": "Wall Street Journal",  "url": "https://feeds.a.dj.com/rss/RSSWorldNews.xml"},
+    {"name": "LA Times",             "url": "https://www.latimes.com/rss2.0.xml"},
+    {"name": "The Guardian",         "url": "https://www.theguardian.com/us-news/rss"},
+    {"name": "Daily Mail",           "url": "https://www.dailymail.co.uk/articles.rss"},
+    {"name": "The Telegraph",        "url": "https://www.telegraph.co.uk/rss.xml"},
 
     # ── Conservative / Alt Media ──
     {"name": "Breitbart",            "url": "https://feeds.feedburner.com/breitbart"},
@@ -85,11 +97,19 @@ FEEDS = [
     {"name": "The Blaze",            "url": "https://www.theblaze.com/feeds/feed.rss"},
     {"name": "Townhall",             "url": "https://townhall.com/rss/tipsheet"},
     {"name": "National Review",      "url": "https://www.nationalreview.com/feed/"},
+    {"name": "Daily Caller",         "url": "https://dailycaller.com/feed/"},
+    {"name": "The Free Press",       "url": "https://www.thefp.com/feed"},
+    {"name": "The Atlantic",         "url": "https://feeds.theatlantic.com/TheAtlantic/all"},
+    {"name": "Rolling Stone",        "url": "https://www.rollingstone.com/politics/feed/"},
+    {"name": "The Daily Beast",      "url": "https://feeds.thedailybeast.com/rss/articles"},
+    {"name": "Wired",                "url": "https://www.wired.com/feed/rss"},
     {"name": "CoinDesk",             "url": "https://www.coindesk.com/arc/outboundfeeds/rss/"},
 
     # ── Legal / Accountability ──
     {"name": "Judicial Watch",       "url": "https://www.judicialwatch.org/feed/"},
     {"name": "Conservative Treehouse","url": "https://theconservativetreehouse.com/feed/"},
+    {"name": "Legal Insurrection",   "url": "https://legalinsurrection.com/feed/"},
+    {"name": "SCOTUSblog",           "url": "https://www.scotusblog.com/feed/"},
 
     # ── International ──
     {"name": "BBC World",            "url": "http://feeds.bbci.co.uk/news/world/rss.xml"},
@@ -100,6 +120,7 @@ FEEDS = [
     {"name": "TASS",                 "url": "https://tass.com/rss/v2.xml"},
     {"name": "South China Morning Post", "url": "https://www.scmp.com/rss/91/feed"},
     {"name": "Middle East Eye",      "url": "https://www.middleeasteye.net/rss"},
+    {"name": "The Debrief",          "url": "https://thedebrief.org/feed/"},
 ]
 
 # ── Topics ───────────────────────────────────────────────────────────────────
@@ -108,61 +129,85 @@ FEEDS = [
 # STRONG topics: match in title OR description (specific enough to be reliable)
 TOPICS_STRONG = {
     # People
-    "trump":            "Trump",
-    "musk":             "Musk / DOGE",
-    "rfk":              "RFK Jr",
-    "epstein":          "Epstein",
-    "pelosi":           "Pelosi",
-    "obama":            "Obama",
-    "zelensky":         "Zelensky",
-    "netanyahu":        "Netanyahu",
-    "putin":            "Putin",
-    "erdogan":          "Erdogan",
-    "lavrov":           "Lavrov",
+    "trump":                    "Trump",
+    "musk":                     "Musk / DOGE",
+    "rfk":                      "RFK Jr",
+    "epstein":                  "Epstein",
+    "pelosi":                   "Pelosi",
+    "obama":                    "Obama",
+    "zelensky":                 "Zelensky",
+    "netanyahu":                "Netanyahu",
+    "putin":                    "Putin",
+    "erdogan":                  "Erdogan",
+    "lavrov":                   "Lavrov",
+    "hegseth":                  "Pentagon / Military",
+    "kash patel":               "FBI",
+    "tulsi":                    "Deep State",
+    "soros":                    "Soros",
+    "open society":             "Soros",
+    "schwab":                   "WEF",
+    "fauci":                    "Vaccine",
     # Specific programs / orgs
-    "doge":             "DOGE",
-    "deep state":       "Deep State",
-    "executive order":  "Executive Order",
-    "supreme court":    "Supreme Court",
-    "federal reserve":  "Federal Reserve",
-    "devolution":       "Devolution",
+    "doge":                     "DOGE",
+    "deep state":               "Deep State",
+    "executive order":          "Executive Order",
+    "supreme court":            "Supreme Court",
+    "federal reserve":          "Federal Reserve",
+    "devolution":               "Devolution",
     "continuity of government": "Devolution",
-    "martial law":      "Deep State",
-    "gitmo":            "Deep State",
-    "guantanamo":       "Deep State",
-    "trafficking":      "Trafficking",
-    "pedophile":        "Trafficking",
-    "child exploitation": "Trafficking",
-    "qanon":            "QAnon",
-    "board of peace":   "Board of Peace",
-    # Specific countries / regions (distinctive enough)
-    "russia":           "Russia",
-    "ukraine":          "Ukraine",
-    "israel":           "Israel",
-    "gaza":             "Gaza",
-    "iran":             "Iran",
-    "china":            "China",
-    "taiwan":           "Taiwan",
-    "north korea":      "North Korea",
-    "saudi":            "Saudi Arabia",
-    "congo":            "Congo",
-    "sahel":            "Sahel",
-    "brics":            "BRICS",
+    "martial law":              "Deep State",
+    "gitmo":                    "Deep State",
+    "guantanamo":               "Deep State",
+    "trafficking":              "Trafficking",
+    "pedophile":                "Trafficking",
+    "child exploitation":       "Trafficking",
+    "qanon":                    "QAnon",
+    "board of peace":           "Board of Peace",
+    "world economic forum":     "WEF",
+    "great reset":              "WEF",
+    "davos":                    "WEF",
+    "agenda 2030":              "WEF",
+    "january 6":                "J6",
+    "jan. 6":                   "J6",
+    "lawfare":                  "Deep State",
+    "pfizer":                   "Vaccine",
+    "mrna":                     "Vaccine",
+    "vaxx":                     "Vaccine",
+    "fentanyl":                 "Border",
+    "cartel":                   "Border",
+    "second amendment":         "2nd Amendment",
+    "fisa":                     "Surveillance",
+    "wiretap":                  "Surveillance",
+    "dedollarization":          "Economy",
+    "petrodollar":              "Economy",
+    # Specific countries / regions
+    "russia":                   "Russia",
+    "ukraine":                  "Ukraine",
+    "israel":                   "Israel",
+    "gaza":                     "Gaza",
+    "iran":                     "Iran",
+    "china":                    "China",
+    "taiwan":                   "Taiwan",
+    "north korea":              "North Korea",
+    "saudi":                    "Saudi Arabia",
+    "congo":                    "Congo",
+    "sahel":                    "Sahel",
+    "brics":                    "BRICS",
     # Finance / tech
-    "bitcoin":          "Bitcoin",
-    "crypto":           "Crypto",
-    "cbdc":             "CBDC",
+    "bitcoin":                  "Bitcoin",
+    "crypto":                   "Crypto",
+    "cbdc":                     "CBDC",
     # Policy
-    "tariff":           "Tariffs",
-    "nato":             "NATO",
-    "nuclear":          "Nuclear",
-    "ufo":              "UFO / UAP",
-    "uap":              "UFO / UAP",
-    "maha":             "MAHA",
-    "rico":             "RICO",
-    "indictment":       "Indictment",
-    "whistleblower":    "Whistleblower",
-    "censorship":       "Censorship",
+    "tariff":                   "Tariffs",
+    "nato":                     "NATO",
+    "nuclear":                  "Nuclear",
+    "ufo":                      "UFO / UAP",
+    "uap":                      "UFO / UAP",
+    "maha":                     "MAHA",
+    "rico":                     "RICO",
+    "indictment":               "Indictment",
+    "whistleblower":            "Whistleblower",
+    "censorship":               "Censorship",
 }
 
 # BROAD topics: must appear in TITLE only (too generic to match descriptions)
@@ -174,20 +219,45 @@ TOPICS_TITLE_ONLY = {
     "election":         "Election",
     "voter":            "Voter / Election",
     "impeach":          "Impeachment",
-    "congress":         "Congress",
-    "senate":           "Senate",
-    "injunction":       "Injunction",
-    "lawsuit":          "Lawsuit",
     "corruption":       "Corruption",
     "immigration":      "Immigration",
     "border":           "Border",
+    "sanctuary":        "Immigration",
     "inflation":        "Economy",
     "pentagon":         "Pentagon / Military",
     "conspiracy":       "Conspiracy",
+    "vaccine":          "Vaccine",
+    "wef":              "WEF",
+    "gun control":      "2nd Amendment",
+    "gun rights":       "2nd Amendment",
+    "ar-15":            "2nd Amendment",
+    "surveillance":     "Surveillance",
+    "j6":               "J6",
 }
 
 # Combined for display/UI — order doesn't matter here
 TOPICS = {**TOPICS_STRONG, **TOPICS_TITLE_ONLY}
+
+# ── Title blocklist ───────────────────────────────────────────────────────────
+# If any of these appear in the article title, skip it regardless of topic match
+TITLE_BLOCKLIST = [
+    # Sports
+    "nba", "nfl", "mlb", "nhl", "super bowl", "world series", "stanley cup",
+    "march madness", "final four", "nba finals", "nba draft", "nfl draft",
+    "trade deadline", "free agency", "pga tour", "nascar", "college football",
+    "college basketball", "premier league", "champions league", "uefa",
+    "fifa", "formula 1", "formula one", "tour de france", "wimbledon",
+    # Entertainment
+    "oscar", "emmy", "grammy", "golden globe", "box office", "movie review",
+    "album review", "billboard", "sitcom", "reality show", "season finale",
+    "music video", "box office", "film festival", "sundance", "cannes",
+    # Celebrity fluff
+    "red carpet", "fashion week", "baby shower", "celebrity couple",
+    "seinfeld", "curb your enthusiasm",
+    # Generic noise
+    "horoscope", "lottery", "crossword", "weather forecast", "recipe",
+    "restaurant review", "travel guide", "best hotels",
+]
 
 
 # ── Twitter ──────────────────────────────────────────────────────────────────
@@ -627,7 +697,7 @@ def fallback_summary(title, desc, topic_label):
 
 # ── Feed processing ──────────────────────────────────────────────────────────
 
-MAX_ENTRIES_PER_FEED = 25  # cap to keep memory usage low on free tier
+MAX_ENTRIES_PER_FEED = 15  # cap to keep memory usage low on free tier
 
 def process_feed(feed_name, url, recent_titles, tweets_this_cycle=None):
     print(f"[{feed_name}] Fetching...")
@@ -649,6 +719,11 @@ def process_feed(feed_name, url, recent_titles, tweets_this_cycle=None):
             pub_date = str(entry.get("published") or entry.get("updated") or datetime.now(timezone.utc).isoformat())
 
             if not title or not link:
+                continue
+
+            # Blocklist check — skip irrelevant content before topic matching
+            title_lower = title.lower()
+            if any(term in title_lower for term in TITLE_BLOCKLIST):
                 continue
 
             # One topic per article — first match wins
